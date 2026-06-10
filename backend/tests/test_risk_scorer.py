@@ -1,0 +1,116 @@
+"""
+tests/test_risk_scorer.py
+
+Unit tests for the risk scoring engine.
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from datetime import date, datetime, timedelta, timezone
+from kpi_engine.calculator import KPICalculator, IssueRecord
+from risk_engine.scorer import RiskScorer, DEFAULT_WEIGHTS
+
+
+def _utc(d: date) -> datetime:
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+
+def make_issue(key, issue_type="Bug", priority="Critical", status_cat="In Progress",
+               created_offset=10, resolved_offset=None, overdue=False,
+               reopened=0, status_age=5, days_no_update=2):
+    today = date.today()
+    created = _utc(today - timedelta(days=created_offset))
+    resolved = _utc(today - timedelta(days=resolved_offset)) if resolved_offset else None
+    return IssueRecord(
+        jira_key=key, project_key="PROJ", summary=f"Issue {key}",
+        issue_type=issue_type, status="In Progress", status_category=status_cat,
+        priority=priority, assignee_id="u001",
+        component_ids=["C1"], fix_version_ids=["V1"], epic_key="E1",
+        created_date=created, resolved_date=resolved,
+        updated_date=created, due_date=None,
+        age_days=created_offset, resolution_time_days=None,
+        cycle_time_days=None, times_reopened=reopened,
+        is_overdue=overdue, days_without_update=days_no_update,
+        current_status_age_days=status_age,
+        dq_missing_assignee=False, dq_missing_priority=False,
+        dq_missing_component=False, dq_missing_fix_version=False,
+        dq_missing_epic=False, dq_missing_due_date=True,
+        dq_closed_without_resolution=False, story_points=None,
+    )
+
+
+class TestRiskScorer:
+
+    def _get_risk(self, issues):
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        return RiskScorer(kpis).score()
+
+    def test_low_risk_clean_project(self):
+        # Healthy project: few issues, all resolved, no overdue
+        issues = [
+            make_issue(f"P-{i}", priority="Low", status_cat="Done",
+                       resolved_offset=5, created_offset=20)
+            for i in range(5)
+        ]
+        risk = self._get_risk(issues)
+        assert risk.risk_level in ("low", "medium")
+
+    def test_high_risk_many_critical_bugs(self):
+        issues = [
+            make_issue(f"P-{i}", issue_type="Bug", priority="Critical",
+                       created_offset=5)
+            for i in range(15)
+        ]
+        risk = self._get_risk(issues)
+        assert risk.composite_score > 25
+        assert len(risk.risk_drivers) > 0
+
+    def test_risk_drivers_not_empty_on_bad_project(self):
+        issues = [
+            make_issue(f"P-{i}", issue_type="Bug", priority="Critical",
+                       overdue=True, status_age=20, reopened=2,
+                       created_offset=5)
+            for i in range(20)
+        ]
+        risk = self._get_risk(issues)
+        assert len(risk.risk_drivers) >= 1
+
+    def test_recommended_actions_provided(self):
+        issues = [make_issue(f"P-{i}") for i in range(10)]
+        risk = self._get_risk(issues)
+        assert isinstance(risk.recommended_actions, list)
+        assert len(risk.recommended_actions) >= 1
+
+    def test_composite_between_0_and_100(self):
+        for n in [0, 1, 10, 100, 500]:
+            issues = [make_issue(f"P-{i}") for i in range(n)]
+            risk = self._get_risk(issues)
+            assert 0 <= risk.composite_score <= 100
+
+    def test_weights_must_sum_to_one(self):
+        import pytest
+        issues = [make_issue("P-1")]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        with pytest.raises(ValueError):
+            RiskScorer(kpis, weights={"delivery": 0.5, "quality": 0.5,
+                                       "compliance": 0.5, "operational": 0.5}).score()
+
+    def test_risk_level_classification(self):
+        from risk_engine.scorer import RiskScorer
+        # Test classify logic directly
+        assert RiskScorer._classify(80) == "critical"
+        assert RiskScorer._classify(60) == "high"
+        assert RiskScorer._classify(35) == "medium"
+        assert RiskScorer._classify(10) == "low"
+
+    def test_result_to_dict_structure(self):
+        issues = [make_issue("P-1")]
+        risk = self._get_risk(issues)
+        d = risk.to_dict()
+        assert "composite_score" in d
+        assert "risk_level" in d
+        assert "dimensions" in d
+        assert "delivery" in d["dimensions"]
+        assert "quality" in d["dimensions"]
+        assert "recommended_actions" in d
+        assert "risk_drivers" in d

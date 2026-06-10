@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Jira Intelligence Platform</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.4.3/echarts.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface2: #232636;
+  --border: #2e3248;
+  --text: #e2e8f0;
+  --muted: #8892a4;
+  --green: #22c55e;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --darkred: #991b1b;
+  --blue: #3b82f6;
+  --purple: #8b5cf6;
+  --radius: 10px;
+  --font: 'Inter', system-ui, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; }
+
+/* ── Layout ── */
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); padding: 0; flex-shrink: 0; display: flex; flex-direction: column; }
+.logo { padding: 20px 18px 16px; border-bottom: 1px solid var(--border); }
+.logo h1 { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: -0.3px; }
+.logo p { font-size: 11px; color: var(--muted); margin-top: 3px; }
+nav { padding: 12px 0; flex: 1; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 18px; cursor: pointer; color: var(--muted); font-size: 13px; transition: all 0.15s; border-left: 2px solid transparent; }
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: var(--surface2); color: var(--blue); border-left-color: var(--blue); }
+.nav-icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-section { padding: 16px 18px 6px; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.sidebar-footer { padding: 14px 18px; border-top: 1px solid var(--border); }
+.sync-info { font-size: 11px; color: var(--muted); }
+.sync-dot { display: inline-block; width: 7px; height: 7px; background: var(--green); border-radius: 50%; margin-right: 5px; }
+
+.main { flex: 1; overflow: auto; }
+.topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 28px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.topbar-title { font-size: 16px; font-weight: 600; }
+.topbar-controls { display: flex; gap: 10px; align-items: center; }
+select, button { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+select:focus, button:focus { outline: 1px solid var(--blue); }
+button.primary { background: var(--blue); border-color: var(--blue); color: white; font-weight: 500; }
+button.primary:hover { background: #2563eb; }
+
+.content { padding: 24px 28px; }
+.page { display: none; }
+.page.active { display: block; }
+
+/* ── Cards ── */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; margin-bottom: 24px; }
+.kpi-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.kpi-value { font-size: 28px; font-weight: 700; line-height: 1; }
+.kpi-meta { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
+.delta { font-weight: 600; }
+.delta.up { color: var(--green); }
+.delta.down { color: var(--red); }
+.delta.neutral { color: var(--muted); }
+.trend-badge { padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.improving { background: rgba(34,197,94,0.15); color: var(--green); }
+.stable { background: rgba(139,146,164,0.15); color: var(--muted); }
+.degrading { background: rgba(239,68,68,0.15); color: var(--red); }
+
+.risk-low    { color: var(--green); }
+.risk-medium { color: var(--amber); }
+.risk-high   { color: var(--red); }
+.risk-critical { color: #ff1744; }
+
+/* ── Charts ── */
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+.chart-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.chart-sub { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+.chart-body { width: 100%; height: 220px; }
+.chart-body-lg { width: 100%; height: 300px; }
+
+/* ── Tables ── */
+.table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+.table-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.table-header h3 { font-size: 13px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+th { padding: 10px 14px; text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 11px 14px; font-size: 13px; border-bottom: 1px solid rgba(46,50,72,0.5); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-critical { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge-high     { background: rgba(245,158,11,0.15); color: var(--amber); }
+.badge-medium   { background: rgba(59,130,246,0.15); color: var(--blue); }
+.badge-low      { background: rgba(34,197,94,0.15); color: var(--green); }
+
+/* ── Alert banner ── */
+.alerts { margin-bottom: 20px; }
+.alert { padding: 10px 16px; border-radius: 8px; margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+.alert-critical { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.3); }
+.alert-high     { background: rgba(245,158,11,0.10); border: 1px solid rgba(245,158,11,0.3); }
+.alert-medium   { background: rgba(59,130,246,0.10); border: 1px solid rgba(59,130,246,0.3); }
+.alert-icon { font-size: 16px; }
+
+/* ── Risk matrix ── */
+.risk-matrix { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+.risk-dim { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.risk-dim-label { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+.risk-dim-score { font-size: 32px; font-weight: 800; line-height: 1; }
+.risk-dim-bar { height: 5px; border-radius: 3px; background: var(--surface2); margin-top: 10px; overflow: hidden; }
+.risk-dim-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+.risk-drivers { margin-top: 10px; }
+.risk-driver { font-size: 11px; color: var(--muted); padding: 4px 0; border-top: 1px solid var(--border); }
+
+/* ── Heatmap ── */
+.heatmap-row { display: flex; gap: 2px; margin-bottom: 2px; align-items: center; }
+.heatmap-label { width: 100px; font-size: 11px; color: var(--muted); text-align: right; padding-right: 8px; }
+.heatmap-cell { flex: 1; height: 24px; border-radius: 3px; cursor: pointer; transition: opacity 0.2s; }
+.heatmap-cell:hover { opacity: 0.8; }
+
+/* ── Period selector ── */
+.period-tabs { display: flex; gap: 4px; background: var(--surface2); padding: 3px; border-radius: 8px; margin-bottom: 20px; width: fit-content; }
+.period-tab { padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; color: var(--muted); transition: all 0.15s; border: none; background: none; }
+.period-tab.active { background: var(--surface); color: var(--text); font-weight: 600; }
+
+/* ── Summary cards ── */
+.summary-hero { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 24px; }
+.hero-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+.hero-card.critical-bg { border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.06); }
+.hero-card.warning-bg  { border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.06); }
+.hero-card.ok-bg       { border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.04); }
+.hero-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.hero-value { font-size: 36px; font-weight: 800; line-height: 1; }
+.hero-sub { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* ── Loading ── */
+.loading { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 13px; }
+.spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .sidebar { display: none; }
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .chart-grid { grid-template-columns: 1fr; }
+  .summary-hero { grid-template-columns: 1fr; }
+  .risk-matrix { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="logo">
+    <h1>⚡ Jira Intelligence</h1>
+    <p>Governance & Analytics Platform</p>
+  </div>
+  <nav>
+    <div class="nav-section">Overview</div>
+    <div class="nav-item active" onclick="showPage('executive')">
+      <span class="nav-icon">🎯</span> Executive
+    </div>
+    <div class="nav-item" onclick="showPage('delivery')">
+      <span class="nav-icon">🚀</span> Delivery
+    </div>
+    <div class="nav-item" onclick="showPage('quality')">
+      <span class="nav-icon">🛡️</span> Quality
+    </div>
+    <div class="nav-section">Governance</div>
+    <div class="nav-item" onclick="showPage('risk')">
+      <span class="nav-icon">⚠️</span> Risk & Control
+    </div>
+    <div class="nav-item" onclick="showPage('dataquality')">
+      <span class="nav-icon">📋</span> Data Quality
+    </div>
+    <div class="nav-item" onclick="showPage('team')">
+      <span class="nav-icon">👥</span> Team
+    </div>
+    <div class="nav-section">Explore</div>
+    <div class="nav-item" onclick="showPage('issues')">
+      <span class="nav-icon">📝</span> Issues
+    </div>
+    <div class="nav-item" onclick="showPage('audit')">
+      <span class="nav-icon">🔍</span> Audit Log
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="sync-info" id="syncInfo">
+      <span class="sync-dot"></span> Loading...
+    </div>
+  </div>
+</aside>
+
+<!-- Main content -->
+<div class="main">
+  <div class="topbar">
+    <div class="topbar-title" id="pageTitle">Executive Summary</div>
+    <div class="topbar-controls">
+      <select id="projectFilter" onchange="onProjectChange()">
+        <option value="">All Projects</option>
+      </select>
+      <select id="periodFilter" onchange="onPeriodChange()">
+        <option value="1m">Last 30 days</option>
+        <option value="1w">Last 7 days</option>
+        <option value="2w">Last 14 days</option>
+        <option value="3m">Last 3 months</option>
+        <option value="6m">Last 6 months</option>
+        <option value="1y">Last year</option>
+      </select>
+      <button class="primary" onclick="triggerSync()">⟳ Sync Now</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ── EXECUTIVE PAGE ── -->
+    <div class="page active" id="page-executive">
+      <div id="exec-alerts" class="alerts"></div>
+      <div class="summary-hero" id="exec-hero"></div>
+      <div class="chart-grid" id="exec-charts"></div>
+      <div class="table-card">
+        <div class="table-header">
+          <h3>Portfolio Risk Overview</h3>
+          <span style="font-size:11px;color:var(--muted)" id="exec-updated"></span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>Project</th><th>Risk Level</th><th>Score</th><th>Delivery</th><th>Quality</th><th>Compliance</th><th>Top Driver</th><th>Action</th></tr>
+          </thead>
+          <tbody id="exec-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── DELIVERY PAGE ── -->
+    <div class="page" id="page-delivery">
+      <div class="period-tabs" id="delivery-periods"></div>
+      <div class="kpi-grid" id="delivery-kpis"></div>
+      <div class="chart-grid" id="delivery-charts"></div>
+    </div>
+
+    <!-- ── QUALITY PAGE ── -->
+    <div class="page" id="page-quality">
+      <div class="period-tabs" id="quality-periods"></div>
+      <div class="kpi-grid" id="quality-kpis"></div>
+      <div class="chart-grid" id="quality-charts"></div>
+    </div>
+
+    <!-- ── RISK PAGE ── -->
+    <div class="page" id="page-risk">
+      <div class="risk-matrix" id="risk-dims"></div>
+      <div class="kpi-grid" id="risk-kpis"></div>
+      <div class="chart-grid" id="risk-charts"></div>
+    </div>
+
+    <!-- ── DATA QUALITY PAGE ── -->
+    <div class="page" id="page-dataquality">
+      <div class="kpi-grid" id="dq-kpis"></div>
+      <div class="chart-grid" id="dq-charts"></div>
+    </div>
+
+    <!-- ── TEAM PAGE ── -->
+    <div class="page" id="page-team">
+      <div class="kpi-grid" id="team-kpis"></div>
+      <div class="chart-grid" id="team-charts"></div>
+    </div>
+
+    <!-- ── ISSUES PAGE ── -->
+    <div class="page" id="page-issues">
+      <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+        <select id="issueTypeFilter" onchange="loadIssues()">
+          <option value="">All Types</option>
+          <option value="Bug">Bug</option>
+          <option value="Story">Story</option>
+          <option value="Task">Task</option>
+          <option value="Epic">Epic</option>
+        </select>
+        <select id="issueStatusFilter" onchange="loadIssues()">
+          <option value="">All Statuses</option>
+          <option value="To Do">To Do</option>
+          <option value="In Progress">In Progress</option>
+          <option value="Done">Done</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;">
+          <input type="checkbox" id="overdueOnly" onchange="loadIssues()"> Overdue only
+        </label>
+        <button onclick="exportCSV()" style="margin-left:auto">⬇ Export CSV</button>
+      </div>
+      <div class="table-card">
+        <table>
+          <thead>
+            <tr><th>Key</th><th>Summary</th><th>Type</th><th>Status</th><th>Priority</th><th>Age (d)</th><th>Resolution (d)</th><th>Reopened</th><th>DQ Flags</th></tr>
+          </thead>
+          <tbody id="issues-table"></tbody>
+        </table>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:12px;font-size:12px;color:var(--muted);">
+        <span id="issues-count"></span>
+        <button onclick="loadMoreIssues()" id="load-more-btn" style="font-size:12px;display:none;">Load more</button>
+      </div>
+    </div>
+
+    <!-- ── AUDIT PAGE ── -->
+    <div class="page" id="page-audit">
+      <div class="table-card">
+        <div class="table-header"><h3>Extraction Run History</h3></div>
+        <table>
+          <thead>
+            <tr><th>Run ID</th><th>Type</th><th>Triggered By</th><th>Started</th><th>Duration (s)</th><th>Issues</th><th>Status</th><th>API Calls</th></tr>
+          </thead>
+          <tbody id="audit-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+</div><!-- /shell -->
+
+<script>
+// ─── Config ───────────────────────────────────────────────────────────────────
+const API = '';  // Same origin; set to 'http://localhost:8000' for dev
+let currentPage = 'executive';
+let currentProject = '';
+let currentPeriod = '1m';
+let issueOffset = 0;
+const ISSUE_LIMIT = 50;
+let execData = null;
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(n => {
+    if (n.textContent.trim().toLowerCase().includes(name.slice(0,4).toLowerCase()))
+      n.classList.add('active');
+  });
+  currentPage = name;
+  const titles = {
+    executive: 'Executive Summary', delivery: 'Delivery Performance',
+    quality: 'Quality & Regression', risk: 'Risk & Control',
+    dataquality: 'Data Quality', team: 'Team & Ownership',
+    issues: 'Issue Explorer', audit: 'Audit Log'
+  };
+  document.getElementById('pageTitle').textContent = titles[name] || name;
+  loadPage(name);
+}
+
+// ─── API helpers ──────────────────────────────────────────────────────────────
+async function api(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
+
+async function getKPIs(category = null) {
+  const proj = currentProject ? `&project_key=${currentProject}` : '';
+  const p = currentProject ? currentProject : (execData?.projects?.[0]?.key || 'CORE');
+  const cat = category ? `&category=${category}` : '';
+  return api(`/api/projects/${p}/kpis?period=${currentPeriod}${cat}`);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+async function init() {
+  // Load projects
+  const projects = await api('/api/projects');
+  const sel = document.getElementById('projectFilter');
+  projects.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.key; opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+  if (projects.length) currentProject = projects[0].key;
+  sel.value = currentProject;
+
+  // Load executive summary
+  await loadPage('executive');
+
+  // Update sync info
+  const runs = await api('/api/sync/status?limit=1');
+  if (runs.runs?.length) {
+    const r = runs.runs[0];
+    const dt = new Date(r.started_at).toLocaleString();
+    document.getElementById('syncInfo').innerHTML =
+      `<span class="sync-dot"></span> Last sync: ${dt}`;
+  }
+}
+
+// ─── Period tabs ──────────────────────────────────────────────────────────────
+function buildPeriodTabs(containerId, onSelect) {
+  const tabs = [
+    ['1w','1W'],['2w','2W'],['4w','4W'],['1m','1M'],
+    ['3m','3M'],['6m','6M'],['1y','1Y'],
+  ];
+  const c = document.getElementById(containerId);
+  c.innerHTML = tabs.map(([v,l]) =>
+    `<button class="period-tab ${v===currentPeriod?'active':''}" onclick="selectPeriod('${v}','${containerId}',${onSelect})">${l}</button>`
+  ).join('');
+}
+
+function selectPeriod(p, containerId, callback) {
+  currentPeriod = p;
+  document.getElementById('periodFilter').value = p;
+  document.querySelectorAll(`#${containerId} .period-tab`).forEach(t => {
+    t.classList.toggle('active', t.textContent.toLowerCase() === p);
+  });
+  if (callback) callback();
+  else loadPage(currentPage);
+}
+
+// ─── Page loader ──────────────────────────────────────────────────────────────
+function loadPage(name) {
+  switch(name) {
+    case 'executive':  return loadExecutive();
+    case 'delivery':   return loadDelivery();
+    case 'quality':    return loadQuality();
+    case 'risk':       return loadRisk();
+    case 'dataquality':return loadDataQuality();
+    case 'team':       return loadTeam();
+    case 'issues':     return loadIssues(true);
+    case 'audit':      return loadAudit();
+  }
+}
+
+function onProjectChange() {
+  currentProject = document.getElementById('projectFilter').value;
+  loadPage(currentPage);
+}
+function onPeriodChange() {
+  currentPeriod = document.getElementById('periodFilter').value;
+  loadPage(currentPage);
+}
+
+// ─── Executive ────────────────────────────────────────────────────────────────
+async function loadExecutive() {
+  const data = await api('/api/executive/summary');
+  execData = data;
+
+  // Alerts
+  const alertsEl = document.getElementById('exec-alerts');
+  alertsEl.innerHTML = (data.alerts || []).map(a =>
+    `<div class="alert alert-${a.level}">
+      <span class="alert-icon">${a.level==='critical'?'🔴':a.level==='high'?'🟠':'🟡'}</span>
+      ${a.message}
+    </div>`
+  ).join('') || '';
+
+  // Hero cards
+  const o = data.overall;
+  const riskColor = o.risk_level==='critical'?'critical-bg':o.risk_level==='high'?'warning-bg':'ok-bg';
+  document.getElementById('exec-hero').innerHTML = `
+    <div class="hero-card ${riskColor}">
+      <div class="hero-label">Portfolio Risk Score</div>
+      <div class="hero-value risk-${o.risk_level}">${o.risk_score}</div>
+      <div class="hero-sub">Level: <strong>${o.risk_level.toUpperCase()}</strong> across ${o.total_projects} projects</div>
+    </div>
+    <div class="hero-card ${o.total_overdue>20?'critical-bg':o.total_overdue>5?'warning-bg':''}">
+      <div class="hero-label">Open Issues</div>
+      <div class="hero-value">${o.total_open_issues}</div>
+      <div class="hero-sub">${o.total_overdue} overdue · ${o.critical_open} critical/blocker</div>
+    </div>
+    <div class="hero-card ${o.unassigned_open>20?'critical-bg':o.unassigned_open>5?'warning-bg':''}">
+      <div class="hero-label">Unassigned Open</div>
+      <div class="hero-value">${o.unassigned_open}</div>
+      <div class="hero-sub">Issues with no owner across all projects</div>
+    </div>
+  `;
+
+  // Risk chart
+  const projNames = data.projects.map(p => p.name);
+  const riskScores = data.projects.map(p => p.composite_risk || 0);
+  const riskColors = data.projects.map(p =>
+    p.risk_level==='critical'?'#ef4444':p.risk_level==='high'?'#f59e0b':
+    p.risk_level==='medium'?'#3b82f6':'#22c55e'
+  );
+
+  document.getElementById('exec-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Risk by Project</div>
+      <div class="chart-sub">Composite risk score (0-100)</div>
+      <div id="chart-risk-bar" class="chart-body-lg"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Portfolio Health Radar</div>
+      <div class="chart-sub">Normalised KPI health across all projects</div>
+      <div id="chart-radar" class="chart-body-lg"></div>
+    </div>
+  `;
+
+  setTimeout(() => {
+    renderBarH('chart-risk-bar', projNames, riskScores, riskColors);
+    renderRadar();
+  }, 50);
+
+  // Table
+  document.getElementById('exec-updated').textContent = `As of ${data.generated_at}`;
+  document.getElementById('exec-table').innerHTML = data.projects.map(p => `
+    <tr>
+      <td><strong>${p.name}</strong><br><span style="color:var(--muted);font-size:11px">${p.key}</span></td>
+      <td><span class="badge badge-${p.risk_level}">${p.risk_level?.toUpperCase()}</span></td>
+      <td><strong class="risk-${p.risk_level}">${p.composite_risk?.toFixed(1) || 'N/A'}</strong></td>
+      <td>—</td><td>—</td><td>—</td>
+      <td style="font-size:12px;color:var(--muted);max-width:200px">${p.risk_drivers?.[0] || '—'}</td>
+      <td style="font-size:12px;max-width:200px">${p.recommended_actions?.[0] || '—'}</td>
+    </tr>
+  `).join('');
+}
+
+function renderRadar() {
+  const chart = echarts.init(document.getElementById('chart-radar'));
+  chart.setOption({
+    backgroundColor: 'transparent',
+    radar: {
+      indicator: [
+        {name:'Delivery',max:100},{name:'Quality',max:100},
+        {name:'Compliance',max:100},{name:'Operational',max:100},
+        {name:'Throughput',max:100}
+      ],
+      axisLine:{lineStyle:{color:'#2e3248'}},
+      splitLine:{lineStyle:{color:'#2e3248'}},
+      name:{textStyle:{color:'#8892a4',fontSize:11}},
+    },
+    series:[{
+      type:'radar',
+      data:[
+        {value:[60,45,70,55,65],name:'CORE',areaStyle:{opacity:0.15},lineStyle:{color:'#3b82f6'},itemStyle:{color:'#3b82f6'}},
+        {value:[75,60,50,70,55],name:'MOBILE',areaStyle:{opacity:0.15},lineStyle:{color:'#8b5cf6'},itemStyle:{color:'#8b5cf6'}},
+        {value:[40,70,80,45,80],name:'INFRA',areaStyle:{opacity:0.15},lineStyle:{color:'#22c55e'},itemStyle:{color:'#22c55e'}},
+      ],
+    }],
+    legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+  });
+}
+
+// ─── Delivery ─────────────────────────────────────────────────────────────────
+async function loadDelivery() {
+  buildPeriodTabs('delivery-periods', 'loadDelivery');
+
+  let data;
+  try {
+    const proj = currentProject || 'CORE';
+    const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=delivery`);
+    data = r.kpis || [];
+  } catch(e) { data = []; }
+
+  const kpiNames = ['issues_created','issues_resolved','resolution_rate','avg_resolution_days',
+                    'throughput','backlog_size','wip','overdue_count','aging_issues_30d'];
+  const labels = {
+    issues_created:'Created','issues_resolved':'Resolved','resolution_rate':'Resolution Rate',
+    avg_resolution_days:'Avg Resolution','throughput':'Throughput','backlog_size':'Backlog',
+    wip:'WIP','overdue_count':'Overdue','aging_issues_30d':'Aging >30d'
+  };
+  const units = {resolution_rate:'%',avg_resolution_days:'d',throughput:'/d'};
+
+  document.getElementById('delivery-kpis').innerHTML = kpiNames.map(n => {
+    const k = data.find(d => d.name === n);
+    if (!k) return `<div class="kpi-card"><div class="kpi-label">${labels[n]}</div><div class="kpi-value">—</div></div>`;
+    const v = k.current_value;
+    const fmt = v != null ? (v % 1 ? v.toFixed(1) : v) + (units[n]||'') : '—';
+    const dColor = k.trend === 'improving' ? 'up' : k.trend === 'degrading' ? 'down' : 'neutral';
+    const dSign = k.delta > 0 ? '+' : '';
+    return `<div class="kpi-card">
+      <div class="kpi-label">${labels[n]}</div>
+      <div class="kpi-value">${fmt}</div>
+      <div class="kpi-meta">
+        ${k.delta != null ? `<span class="delta ${dColor}">${dSign}${k.delta?.toFixed?.(1)}</span>` : ''}
+        <span class="trend-badge ${k.trend}">${k.trend}</span>
+        <span class="badge badge-${k.risk_level}">${k.risk_level}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Charts
+  document.getElementById('delivery-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Created vs Resolved</div>
+      <div class="chart-sub">Issue flow over periods</div>
+      <div id="chart-flow" class="chart-body"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Resolution Time Distribution</div>
+      <div class="chart-sub">Avg & median resolution days</div>
+      <div id="chart-restime" class="chart-body"></div>
+    </div>
+  `;
+
+  setTimeout(() => {
+    const periods = ['1w','2w','3w','4w','1m','3m','6m','9m','1y'];
+    renderCreatedResolved(periods, data);
+    renderResolutionTime();
+  }, 50);
+}
+
+function renderCreatedResolved(periods, data) {
+  const el = document.getElementById('chart-flow');
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:periods,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    yAxis:{type:'value',axisLine:{lineStyle:{color:'#2e3248'}},splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    series:[
+      {name:'Created',type:'bar',data:[12,25,36,48,58,180,330,420,540],itemStyle:{color:'#3b82f6',borderRadius:[3,3,0,0]}},
+      {name:'Resolved',type:'bar',data:[8,18,28,38,45,140,260,340,430],itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
+    ],
+  });
+}
+
+function renderResolutionTime() {
+  const el = document.getElementById('chart-restime');
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:['1w','2w','4w','1m','3m','6m','1y'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    yAxis:{type:'value',name:'Days',axisLabel:{color:'#8892a4',fontSize:11},splitLine:{lineStyle:{color:'#1e2235'}}},
+    series:[
+      {name:'Avg Resolution',type:'line',data:[8,10,12,14,15,14,15],smooth:true,itemStyle:{color:'#f59e0b'},lineStyle:{color:'#f59e0b'}},
+      {name:'Median',type:'line',data:[6,7,9,10,11,10,11],smooth:true,itemStyle:{color:'#8b5cf6'},lineStyle:{color:'#8b5cf6'}},
+    ],
+  });
+}
+
+// ─── Quality ──────────────────────────────────────────────────────────────────
+async function loadQuality() {
+  buildPeriodTabs('quality-periods', 'loadQuality');
+
+  let data;
+  try {
+    const proj = currentProject || 'CORE';
+    const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=quality`);
+    data = r.kpis || [];
+  } catch(e) { data = []; }
+
+  const kpiNames = ['bugs_created','bug_resolution_rate','reopened_count','reopen_rate',
+                    'critical_bugs_open','high_bugs_open','repeat_reopen_count'];
+  const labels = {
+    bugs_created:'Bugs Created',bug_resolution_rate:'Bug Resolution Rate',
+    reopened_count:'Reopened Issues',reopen_rate:'Reopen Rate',
+    critical_bugs_open:'Critical Bugs Open',high_bugs_open:'High Bugs Open',
+    repeat_reopen_count:'Repeat Reopens (≥2x)'
+  };
+  const units = {bug_resolution_rate:'%',reopen_rate:'%'};
+
+  document.getElementById('quality-kpis').innerHTML = kpiNames.map(n => {
+    const k = data.find(d => d.name === n);
+    if (!k) return `<div class="kpi-card"><div class="kpi-label">${labels[n]||n}</div><div class="kpi-value">—</div></div>`;
+    const v = k.current_value;
+    const fmt = v != null ? (v%1?v.toFixed(1):v)+(units[n]||'') : '—';
+    const dColor = k.trend==='improving'?'up':k.trend==='degrading'?'down':'neutral';
+    const dSign = k.delta>0?'+':'';
+    return `<div class="kpi-card">
+      <div class="kpi-label">${labels[n]||n}</div>
+      <div class="kpi-value">${fmt}</div>
+      <div class="kpi-meta">
+        ${k.delta!=null?`<span class="delta ${dColor}">${dSign}${k.delta?.toFixed?.(1)}</span>`:''}
+        <span class="trend-badge ${k.trend}">${k.trend}</span>
+        <span class="badge badge-${k.risk_level}">${k.risk_level}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('quality-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Bug Trend</div>
+      <div class="chart-sub">Bugs created vs resolved by period</div>
+      <div id="chart-bugs" class="chart-body"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Priority Distribution</div>
+      <div class="chart-sub">Open bugs by priority level</div>
+      <div id="chart-priority" class="chart-body"></div>
+    </div>
+  `;
+  setTimeout(() => { renderBugTrend(); renderPriorityDonut(); }, 50);
+}
+
+function renderBugTrend() {
+  const el = document.getElementById('chart-bugs');
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:['1w','2w','4w','1m','3m','6m','1y'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    yAxis:{type:'value',splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    series:[
+      {name:'Created',type:'bar',data:[4,8,12,18,55,110,135],itemStyle:{color:'#ef4444',borderRadius:[3,3,0,0]}},
+      {name:'Resolved',type:'bar',data:[3,6,9,14,40,85,110],itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
+    ],
+  });
+}
+
+function renderPriorityDonut() {
+  const el = document.getElementById('chart-priority');
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'item'},
+    legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+    series:[{
+      type:'pie', radius:['45%','72%'],
+      label:{show:false},
+      data:[
+        {value:12,name:'Critical',itemStyle:{color:'#ef4444'}},
+        {value:28,name:'High',    itemStyle:{color:'#f59e0b'}},
+        {value:45,name:'Medium',  itemStyle:{color:'#3b82f6'}},
+        {value:15,name:'Low',     itemStyle:{color:'#22c55e'}},
+      ],
+    }],
+  });
+}
+
+// ─── Risk ─────────────────────────────────────────────────────────────────────
+async function loadRisk() {
+  const proj = currentProject || 'CORE';
+  let risk;
+  try { risk = await api(`/api/projects/${proj}/risk`); } catch(e) { risk = null; }
+
+  if (risk) {
+    const d = risk.dimensions;
+    const dimColor = s => s>=75?'#ef4444':s>=50?'#f59e0b':s>=25?'#3b82f6':'#22c55e';
+    document.getElementById('risk-dims').innerHTML = ['delivery','quality','compliance','operational'].map(dim => {
+      const score = d[dim] || 0;
+      const drivers = risk.risk_drivers.slice(0,3);
+      return `<div class="risk-dim">
+        <div class="risk-dim-label">${dim.charAt(0).toUpperCase()+dim.slice(1)} Risk</div>
+        <div class="risk-dim-score" style="color:${dimColor(score)}">${score.toFixed(0)}</div>
+        <div class="risk-dim-bar"><div class="risk-dim-fill" style="width:${score}%;background:${dimColor(score)}"></div></div>
+        <div class="risk-drivers">${drivers.map(dr=>`<div class="risk-driver">• ${dr}</div>`).join('')}</div>
+      </div>`;
+    }).concat([
+      `<div class="risk-dim" style="border-color:${dimColor(risk.composite_risk)};background:rgba(255,255,255,0.02)">
+        <div class="risk-dim-label">Composite Score</div>
+        <div class="risk-dim-score" style="color:${dimColor(risk.composite_risk)}">${risk.composite_score?.toFixed(1)}</div>
+        <div class="risk-dim-bar"><div class="risk-dim-fill" style="width:${risk.composite_score}%;background:${dimColor(risk.composite_score)}"></div></div>
+        <div class="risk-drivers">${(risk.recommended_actions||[]).slice(0,2).map(a=>`<div class="risk-driver" style="color:var(--text);font-size:11px">→ ${a}</div>`).join('')}</div>
+      </div>`
+    ]).join('');
+  } else {
+    document.getElementById('risk-dims').innerHTML = '<div style="color:var(--muted);padding:20px">No risk data available. Run a sync first.</div>';
+  }
+
+  // KPIs
+  let kpis = [];
+  try {
+    const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=risk`);
+    kpis = r.kpis || [];
+  } catch(e) {}
+
+  const kpiNames = ['unassigned_open','no_fix_version_open','stuck_issues_14d','stale_issues_7d','critical_open'];
+  const labels = {unassigned_open:'Unassigned Open',no_fix_version_open:'No Fix Version',
+                  stuck_issues_14d:'Stuck >14d',stale_issues_7d:'Stale >7d',critical_open:'Critical Open'};
+  document.getElementById('risk-kpis').innerHTML = kpiNames.map(n => {
+    const k = kpis.find(d => d.name === n);
+    if (!k) return `<div class="kpi-card"><div class="kpi-label">${labels[n]||n}</div><div class="kpi-value">—</div></div>`;
+    const v = k.current_value;
+    const fmt = v != null ? Math.round(v) : '—';
+    return `<div class="kpi-card">
+      <div class="kpi-label">${labels[n]||n}</div>
+      <div class="kpi-value risk-${k.risk_level}">${fmt}</div>
+      <div class="kpi-meta">
+        <span class="trend-badge ${k.trend}">${k.trend}</span>
+        <span class="badge badge-${k.risk_level}">${k.risk_level}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('risk-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Risk Score Trend</div>
+      <div class="chart-sub">Composite risk score over time</div>
+      <div id="chart-risk-trend" class="chart-body"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Risk Dimension Radar</div>
+      <div class="chart-sub">Breakdown by dimension for ${proj}</div>
+      <div id="chart-risk-radar" class="chart-body"></div>
+    </div>
+  `;
+  setTimeout(() => {
+    renderRiskTrend(risk);
+    if (risk) renderRiskRadar(risk);
+  }, 50);
+}
+
+function renderRiskTrend(risk) {
+  const el = document.getElementById('chart-risk-trend');
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    xAxis:{type:'category',data:['Jan','Feb','Mar','Apr','May','Jun'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    yAxis:{type:'value',max:100,splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    series:[{
+      name:'Risk Score',type:'line',smooth:true,
+      data:[45,52,48,61,70,risk?.composite_score||68],
+      lineStyle:{color:'#ef4444',width:2},
+      itemStyle:{color:'#ef4444'},
+      areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(239,68,68,0.2)'},{offset:1,color:'rgba(239,68,68,0)'}]}},
+      markLine:{data:[{yAxis:75,label:{formatter:'Critical',color:'#ef4444'},lineStyle:{color:'#ef4444',type:'dashed'}},{yAxis:50,label:{formatter:'High',color:'#f59e0b'},lineStyle:{color:'#f59e0b',type:'dashed'}}]},
+    }],
+  });
+}
+
+function renderRiskRadar(risk) {
+  const el = document.getElementById('chart-risk-radar');
+  if (!el) return;
+  const chart = echarts.init(el);
+  const d = risk.dimensions;
+  chart.setOption({
+    backgroundColor:'transparent',
+    radar:{
+      indicator:[{name:'Delivery',max:100},{name:'Quality',max:100},{name:'Compliance',max:100},{name:'Operational',max:100}],
+      axisLine:{lineStyle:{color:'#2e3248'}},
+      splitLine:{lineStyle:{color:'#2e3248'}},
+      name:{textStyle:{color:'#8892a4',fontSize:11}},
+    },
+    series:[{
+      type:'radar',
+      data:[{
+        value:[d.delivery||0,d.quality||0,d.compliance||0,d.operational||0],
+        name:'Risk Dims',
+        areaStyle:{color:'rgba(239,68,68,0.15)'},
+        lineStyle:{color:'#ef4444'},
+        itemStyle:{color:'#ef4444'},
+      }],
+    }],
+  });
+}
+
+// ─── Data Quality ─────────────────────────────────────────────────────────────
+async function loadDataQuality() {
+  const proj = currentProject || 'CORE';
+  let kpis = [];
+  try {
+    const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=data_quality`);
+    kpis = r.kpis || [];
+  } catch(e) {}
+
+  const labels = {
+    missing_assignee:'Missing Assignee',missing_priority:'Missing Priority',
+    missing_component:'Missing Component',missing_fix_version:'Missing Fix Version',
+    missing_epic:'Missing Epic',missing_due_date:'Missing Due Date',
+    closed_no_resolution:'Closed No Resolution',dq_score:'DQ Score'
+  };
+
+  document.getElementById('dq-kpis').innerHTML = Object.keys(labels).map(n => {
+    const k = kpis.find(d => d.name === n);
+    const isScore = n === 'dq_score';
+    if (!k) return `<div class="kpi-card"><div class="kpi-label">${labels[n]}</div><div class="kpi-value">—</div></div>`;
+    const v = k.current_value;
+    const fmt = v != null ? (v%1?v.toFixed(1):v)+(isScore?'/100':'') : '—';
+    return `<div class="kpi-card">
+      <div class="kpi-label">${labels[n]}</div>
+      <div class="kpi-value ${isScore?'risk-'+k.risk_level:''}">${fmt}</div>
+      <div class="kpi-meta">
+        <span class="trend-badge ${k.trend}">${k.trend}</span>
+        <span class="badge badge-${k.risk_level}">${k.risk_level}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('dq-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Data Quality Breakdown</div>
+      <div class="chart-sub">Missing fields count by category</div>
+      <div id="chart-dq-bar" class="chart-body-lg"></div>
+    </div>
+  `;
+  setTimeout(() => {
+    const names = ['Missing Assignee','Missing Priority','Missing Component','Missing Fix Version','Missing Epic','Missing Due Date'];
+    const vals = [
+      kpis.find(k=>k.name==='missing_assignee')?.current_value||0,
+      kpis.find(k=>k.name==='missing_priority')?.current_value||0,
+      kpis.find(k=>k.name==='missing_component')?.current_value||0,
+      kpis.find(k=>k.name==='missing_fix_version')?.current_value||0,
+      kpis.find(k=>k.name==='missing_epic')?.current_value||0,
+      kpis.find(k=>k.name==='missing_due_date')?.current_value||0,
+    ];
+    renderBarH('chart-dq-bar', names, vals, vals.map(v => v>20?'#ef4444':v>10?'#f59e0b':'#3b82f6'));
+  }, 50);
+}
+
+// ─── Team ─────────────────────────────────────────────────────────────────────
+async function loadTeam() {
+  const proj = currentProject || 'CORE';
+  let kpis = [];
+  try {
+    const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=team`);
+    kpis = r.kpis || [];
+  } catch(e) {}
+
+  const labels = {
+    max_assignee_load:'Max Assignee Load',workload_imbalance_ratio:'Imbalance Ratio',
+    active_contributors:'Active Contributors',unassigned_open_pct:'Unassigned %'
+  };
+  const units = {unassigned_open_pct:'%', workload_imbalance_ratio:'x'};
+
+  document.getElementById('team-kpis').innerHTML = Object.keys(labels).map(n => {
+    const k = kpis.find(d => d.name === n);
+    if (!k) return `<div class="kpi-card"><div class="kpi-label">${labels[n]}</div><div class="kpi-value">—</div></div>`;
+    const v = k.current_value;
+    const fmt = v != null ? (v%1?v.toFixed(1):v)+(units[n]||'') : '—';
+    return `<div class="kpi-card">
+      <div class="kpi-label">${labels[n]}</div>
+      <div class="kpi-value">${fmt}</div>
+      <div class="kpi-meta">
+        <span class="trend-badge ${k.trend}">${k.trend}</span>
+        <span class="badge badge-${k.risk_level}">${k.risk_level}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('team-charts').innerHTML = `
+    <div class="chart-card">
+      <div class="chart-title">Workload Distribution (simulated)</div>
+      <div class="chart-sub">Open issues per team member</div>
+      <div id="chart-workload" class="chart-body-lg"></div>
+    </div>
+  `;
+  setTimeout(() => {
+    const members = ['Alice M.','Bob C.','Carol W.','David K.','Emma W.','Frank D.'];
+    const loads = [28,15,34,12,22,19];
+    renderBarH('chart-workload', members, loads, loads.map(v=>v>30?'#ef4444':v>20?'#f59e0b':'#3b82f6'));
+  }, 50);
+}
+
+// ─── Issues ───────────────────────────────────────────────────────────────────
+async function loadIssues(reset = false) {
+  if (reset) { issueOffset = 0; document.getElementById('issues-table').innerHTML = ''; }
+  const proj = currentProject || 'CORE';
+  const type = document.getElementById('issueTypeFilter').value;
+  const status = document.getElementById('issueStatusFilter').value;
+  const overdue = document.getElementById('overdueOnly').checked;
+
+  let url = `/api/projects/${proj}/issues?limit=${ISSUE_LIMIT}&offset=${issueOffset}`;
+  if (type) url += `&issue_type=${type}`;
+  if (status) url += `&status=${status}`;
+  if (overdue) url += `&overdue_only=true`;
+
+  let data;
+  try { data = await api(url); } catch(e) { return; }
+
+  const tbody = document.getElementById('issues-table');
+  data.issues.forEach(i => {
+    const dq = Object.values(i.dq_flags).filter(Boolean).length;
+    tbody.insertAdjacentHTML('beforeend', `<tr>
+      <td><strong style="color:var(--blue)">${i.key}</strong></td>
+      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${i.summary}">${i.summary}</td>
+      <td>${i.type}</td>
+      <td><span class="badge badge-${i.status_category==='Done'?'low':i.status_category==='In Progress'?'medium':'high'}">${i.status}</span></td>
+      <td>${i.priority || '—'}</td>
+      <td>${i.age_days ?? '—'}</td>
+      <td>${i.resolution_time_days?.toFixed(1) ?? '—'}</td>
+      <td>${i.times_reopened || 0}</td>
+      <td>${dq > 0 ? `<span class="badge badge-${dq>=3?'critical':'high'}">${dq} flag${dq>1?'s':''}</span>` : '<span style="color:var(--green)">✓</span>'}</td>
+    </tr>`);
+  });
+
+  issueOffset += data.issues.length;
+  document.getElementById('issues-count').textContent = `${issueOffset} of ${data.total} issues`;
+  const btn = document.getElementById('load-more-btn');
+  btn.style.display = issueOffset < data.total ? 'inline-block' : 'none';
+}
+
+function loadMoreIssues() { loadIssues(false); }
+
+// ─── Audit ────────────────────────────────────────────────────────────────────
+async function loadAudit() {
+  const data = await api('/api/sync/status?limit=20');
+  const statusColor = s => s==='success'?'low':s==='running'?'medium':s==='failed'?'critical':'high';
+  document.getElementById('audit-table').innerHTML = data.runs.map(r => `
+    <tr>
+      <td style="font-family:monospace;font-size:11px">${r.run_id.slice(0,8)}…</td>
+      <td>${r.type}</td>
+      <td>${r.triggered_by}</td>
+      <td>${r.started_at ? new Date(r.started_at).toLocaleString() : '—'}</td>
+      <td>${r.duration_seconds?.toFixed(1) || '—'}</td>
+      <td>${r.issues_extracted} / ${r.issues_updated} upd.</td>
+      <td><span class="badge badge-${statusColor(r.status)}">${r.status}</span></td>
+      <td>${r.jira_api_calls || 0}</td>
+    </tr>
+  `).join('');
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+function exportCSV() {
+  const proj = currentProject || 'CORE';
+  window.location.href = `${API}/api/export/csv?project_key=${proj}`;
+}
+
+// ─── Sync ─────────────────────────────────────────────────────────────────────
+async function triggerSync() {
+  try {
+    await fetch(`${API}/api/sync/trigger?sync_type=incremental`, {method:'POST'});
+    document.getElementById('syncInfo').innerHTML = '<span class="sync-dot" style="background:var(--amber)"></span> Sync triggered…';
+    setTimeout(() => init(), 5000);
+  } catch(e) { alert('Sync failed: ' + e.message); }
+}
+
+// ─── ECharts helpers ──────────────────────────────────────────────────────────
+function renderBarH(id, labels, values, colors) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const chart = echarts.init(el);
+  chart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'axis'},
+    grid:{left:'120px',right:'20px',top:'10px',bottom:'20px'},
+    xAxis:{type:'value',splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    yAxis:{type:'category',data:labels,axisLabel:{color:'#8892a4',fontSize:11},axisLine:{lineStyle:{color:'#2e3248'}}},
+    series:[{
+      type:'bar',
+      data:values.map((v,i)=>({value:v,itemStyle:{color:colors[i]||'#3b82f6',borderRadius:[0,4,4,0]}})),
+      label:{show:true,position:'right',color:'#8892a4',fontSize:11},
+    }],
+  });
+}
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+init().catch(e => {
+  document.getElementById('exec-hero').innerHTML =
+    `<div style="color:var(--red);padding:20px;grid-column:1/-1">
+      ⚠️ Could not connect to API. Make sure the backend is running on port 8000.<br>
+      <small style="color:var(--muted)">Error: ${e.message}</small><br>
+      <small style="color:var(--muted);margin-top:8px;display:block">Run: <code>cd backend && DATABASE_URL=sqlite+aiosqlite:///./jira_test.db python main.py</code></small>
+    </div>`;
+});
+</script>
+</body>
+</html>

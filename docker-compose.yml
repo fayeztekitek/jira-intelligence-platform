@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jirauser
+      POSTGRES_PASSWORD: jirapass
+      POSTGRES_DB: jira_intelligence
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jirauser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://jirauser:jirapass@postgres:5432/jira_intelligence
+      JIRA_BASE_URL: ${JIRA_BASE_URL}
+      JIRA_AUTH_TYPE: ${JIRA_AUTH_TYPE:-api_token}
+      JIRA_USERNAME: ${JIRA_USERNAME}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+      APP_ENV: production
+      SCHEDULER_ENABLED: "true"
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/logs:/app/logs
+
+volumes:
+  postgres_data:
