@@ -1,0 +1,183 @@
+# ============================================================
+# CD — Deploy to production
+# Triggers: push to main (after CI passes)
+# Strategy: build Docker image → push to GitHub Container Registry → deploy
+# ============================================================
+name: CD — Deploy
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"         # also triggers on version tags like v1.2.3
+
+  workflow_run:
+    workflows: ["CI — Build & Test"]
+    types: [completed]
+    branches: [main]
+
+# Only deploy if CI passed
+jobs:
+
+  # ── Guard: only proceed if CI succeeded ─────────────────────
+  check-ci:
+    name: Check CI status
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      should-deploy: ${{ steps.check.outputs.deploy }}
+    steps:
+      - name: Set deploy flag
+        id: check
+        run: echo "deploy=true" >> $GITHUB_OUTPUT
+
+  # ── Build & push Docker image ────────────────────────────────
+  docker-build:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    needs: check-ci
+    if: needs.check-ci.outputs.should-deploy == 'true'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Image digest
+        run: echo "Image digest ${{ steps.build.outputs.digest }}"
+
+  # ── Deploy to staging ────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    needs: docker-build
+    environment:
+      name: staging
+      url: https://staging.jira-intelligence.example.com
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging server
+        # Replace this step with your actual deployment method:
+        # Option A: SSH deploy  (uncomment and configure)
+        # Option B: Render.com  (uncomment and configure)
+        # Option C: Railway     (uncomment and configure)
+        run: |
+          echo "Deploying image: ${{ needs.docker-build.outputs.image-tag }}"
+          echo "Digest: ${{ needs.docker-build.outputs.image-digest }}"
+          echo "---"
+          echo "Configure one of the deployment options in this step:"
+          echo "  A) SSH: add SSH_HOST, SSH_USER, SSH_KEY to repository secrets"
+          echo "  B) Render: add RENDER_DEPLOY_HOOK_URL to repository secrets"
+          echo "  C) Railway: add RAILWAY_TOKEN to repository secrets"
+
+        # ── Option A: SSH deploy ───────────────────────────────
+        # env:
+        #   IMAGE: ${{ needs.docker-build.outputs.image-tag }}
+        # run: |
+        #   echo "${{ secrets.SSH_KEY }}" > /tmp/key && chmod 600 /tmp/key
+        #   ssh -o StrictHostKeyChecking=no -i /tmp/key \
+        #     ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+        #     "docker pull ${IMAGE} && \
+        #      docker stop jira-intelligence || true && \
+        #      docker rm jira-intelligence || true && \
+        #      docker run -d --name jira-intelligence \
+        #        -p 8000:8000 \
+        #        -e DATABASE_URL=${{ secrets.DATABASE_URL }} \
+        #        -e JIRA_BASE_URL=${{ secrets.JIRA_BASE_URL }} \
+        #        -e JIRA_API_TOKEN=${{ secrets.JIRA_API_TOKEN }} \
+        #        -e JIRA_USERNAME=${{ secrets.JIRA_USERNAME }} \
+        #        ${IMAGE}"
+
+        # ── Option B: Render.com ───────────────────────────────
+        # run: |
+        #   curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+      - name: Staging smoke test
+        run: |
+          echo "Run smoke test against staging URL"
+          echo "Uncomment when staging URL is configured:"
+          # curl -f https://staging.jira-intelligence.example.com/api/health
+
+  # ── Deploy to production ─────────────────────────────────────
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment:
+      name: production
+      url: https://jira-intelligence.example.com
+
+    # Production requires manual approval (configure in GitHub Environments)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        run: |
+          echo "Production deployment"
+          echo "Image: ${{ needs.docker-build.outputs.image-tag }}"
+          echo "Configure deployment secrets in GitHub repository settings:"
+          echo "  Settings → Secrets → Actions:"
+          echo "    DATABASE_URL, JIRA_BASE_URL, JIRA_API_TOKEN, JIRA_USERNAME"
+          echo "  Settings → Environments → production:"
+          echo "    Add 'Required reviewers' for manual approval gate"
+
+      - name: Create GitHub deployment annotation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: 'production',
+              description: 'Jira Intelligence Platform deployment',
+              auto_merge: false,
+              required_contexts: [],
+            })

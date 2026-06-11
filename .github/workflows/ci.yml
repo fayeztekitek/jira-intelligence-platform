@@ -1,0 +1,161 @@
+# ============================================================
+# CI — runs on every push and pull request to main/develop
+# Steps: install → lint → unit tests → mock data seed → API smoke test
+# ============================================================
+name: CI — Build & Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    env:
+      DATABASE_URL: sqlite+aiosqlite:///./ci_test.db
+      JIRA_BASE_URL: https://mock.atlassian.net
+      JIRA_AUTH_TYPE: api_token
+      JIRA_USERNAME: ci@test.com
+      JIRA_API_TOKEN: mock_token_for_ci
+      APP_ENV: development
+      SCHEDULER_ENABLED: "false"
+      LOG_LEVEL: WARNING
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python setup ────────────────────────────────────────
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      # ── Install dependencies ─────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio flake8
+
+      # ── Lint ────────────────────────────────────────────────
+      - name: Lint with flake8
+        run: |
+          flake8 . \
+            --max-line-length=120 \
+            --exclude=__pycache__,.venv,migrations \
+            --ignore=E501,W503,E203 \
+            --count --statistics
+        continue-on-error: true
+
+      # ── Unit tests ──────────────────────────────────────────
+      - name: Run KPI calculator tests
+        run: pytest tests/test_kpi_calculator.py -v --tb=short
+
+      - name: Run risk scorer tests
+        run: pytest tests/test_risk_scorer.py -v --tb=short
+
+      # ── Seed mock data ──────────────────────────────────────
+      - name: Seed mock database
+        run: python -m tests.seed_mock_data
+
+      # ── API smoke test ───────────────────────────────────────
+      - name: API smoke test
+        run: |
+          python -c "
+          import asyncio
+          from httpx import AsyncClient, ASGITransport
+          from main import app
+
+          async def smoke():
+              async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as c:
+                  endpoints = [
+                      '/api/health',
+                      '/api/projects',
+                      '/api/projects/CORE/kpis?period=1m',
+                      '/api/projects/CORE/risk',
+                      '/api/executive/summary',
+                      '/api/sync/status',
+                  ]
+                  failed = []
+                  for ep in endpoints:
+                      r = await c.get(ep)
+                      status = '✅' if r.status_code < 400 else '❌'
+                      print(f'{status} {r.status_code} {ep}')
+                      if r.status_code >= 400:
+                          failed.append(ep)
+                  if failed:
+                      raise SystemExit(f'Failed endpoints: {failed}')
+                  print('All smoke tests passed.')
+
+          asyncio.run(smoke())
+          "
+
+      # ── Upload test DB as artifact ───────────────────────────
+      - name: Upload test database artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-test-db-py${{ matrix.python-version }}
+          path: backend/ci_test.db
+          retention-days: 3
+
+  # ── Frontend validation ─────────────────────────────────────
+  frontend:
+    name: Frontend validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate HTML dashboard
+        run: |
+          if [ -f frontend/index.html ]; then
+            echo "✅ frontend/index.html exists"
+            wc -l frontend/index.html
+          else
+            echo "❌ frontend/index.html missing"
+            exit 1
+          fi
+
+      - name: Check ECharts CDN reference
+        run: |
+          grep -q "echarts" frontend/index.html && echo "✅ ECharts CDN found" || (echo "❌ ECharts CDN missing" && exit 1)
+
+  # ── Summary ─────────────────────────────────────────────────
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [test, frontend]
+    if: always()
+
+    steps:
+      - name: Print CI result
+        run: |
+          echo "================================"
+          echo "  CI PIPELINE COMPLETE"
+          echo "================================"
+          echo "Test jobs:    ${{ needs.test.result }}"
+          echo "Frontend job: ${{ needs.frontend.result }}"
+          if [[ "${{ needs.test.result }}" == "success" && "${{ needs.frontend.result }}" == "success" ]]; then
+            echo "STATUS: ✅ All checks passed — ready to deploy"
+          else
+            echo "STATUS: ❌ One or more checks failed"
+            exit 1
+          fi
