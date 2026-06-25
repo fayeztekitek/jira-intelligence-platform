@@ -195,13 +195,18 @@ class JiraClient:
         jql: str,
         fields: list[str] | None = None,
         expand: list[str] | None = None,
+        field_map: dict[str, str] | None = None,
     ) -> AsyncGenerator[dict, None]:
-        """Stream all issues matching a JQL query."""
-        # Use configurable field IDs from settings
+        """Stream all issues matching a JQL query.
+
+        Args:
+            field_map: Optional dict of logical_key → field_id.
+                       If provided, overrides settings-based field resolution.
+        """
         s = self.settings
-        epic_field = s.jira_field_epic_link
-        sp_field = s.jira_field_story_points
-        sprint_field = s.jira_field_sprint
+        epic_field = (field_map or {}).get("epic_link") or s.jira_field_epic_link
+        sp_field = (field_map or {}).get("story_points") or s.jira_field_story_points
+        sprint_field = (field_map or {}).get("sprint") or s.jira_field_sprint
         default_fields = [
             "summary", "description", "issuetype", "status", "priority",
             "assignee", "reporter", "created", "updated", "resolutiondate",
@@ -275,6 +280,17 @@ class JiraClient:
         if isinstance(data, list):
             return data
         return data.get("values", []) if isinstance(data, dict) else []
+
+    # ─── Field discovery ─────────────────────────────────────────────────────
+
+    async def get_fields(self) -> list[dict]:
+        """Fetch all Jira fields (custom + system) for field ID discovery.
+        Uses v2 API for Data Center compatibility (v9.12.x).
+        """
+        data = await self._request("GET", "/rest/api/2/field")
+        if isinstance(data, list):
+            return data
+        return []
 
     async def server_info(self) -> dict:
         """Returns Jira server info — used to detect Cloud vs Data Center."""

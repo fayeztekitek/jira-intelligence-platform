@@ -30,6 +30,8 @@ from sqlalchemy import select, func, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import require_auth, UserSession
+from jira_connector.client import JiraClient
+from jira_connector.fields import FieldDiscoverer
 from storage.database import get_db
 from storage.models import (
     DimProject, FactIssue, KPIResult, RiskScore, ExtractionRun, FactSnapshot
@@ -45,6 +47,23 @@ router = APIRouter(prefix="/api")
 @router.get("/health")
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ---------------------------------------------------------------------------
+# Field discovery
+# ---------------------------------------------------------------------------
+
+
+@router.get("/fields")
+async def list_fields(user: AuthDep):
+    """Return the discovered Jira customfield ID mappings."""
+    client = JiraClient()
+    try:
+        discoverer = FieldDiscoverer(client)
+        field_map = await discoverer.get_field_map()
+        return field_map
+    finally:
+        await client.close()
 
 
 # ─── Auth dependency alias ────────────────────────────────────────────

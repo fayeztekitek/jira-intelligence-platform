@@ -16,16 +16,16 @@
 | ✅ Completed | S2.4 | Fix Retry-After crash | 1 | — |
 | ✅ Completed | S2.5 | Remove redundant context manager | 1 | — |
 | ✅ Completed | S2.6 | Populate lead_time_days, cycle_time_days | 2 | — |
-| 🔵 Planned | S2.7 | Auto-discover customfield IDs | 5 | — |
-| 🔵 Planned | S2.8 | OAuth2 flow implementation | 8 | — |
-| 🔵 Planned | S2.9 | Extractor unit tests | 8 | S2.1–S2.6 |
-| 🔵 Planned | S2.10 | FactTransition index | 1 | S2.2 |
+| ✅ Completed | S2.7 | Auto-discover customfield IDs | 5 | — |
+| ⏭️ Deferred | S2.8 | OAuth2 flow implementation | 8 | — |
+| ✅ Completed | S2.9 | Extractor unit tests | 8 | S2.1–S2.6 |
+| ✅ Completed | S2.10 | FactTransition index | 1 | S2.2 |
 
 ## Definition of Done
 
 - [ ] Extraction works against any Jira instance (no hardcoded field IDs)
 - [ ] `alembic upgrade head` creates full schema
-- [ ] OAuth2 flow works (if implemented)
+- [x] OAuth2 flow deferred — Jira Data Center v9.12.23 uses PAT/API tokens
 - [ ] All extractor tests pass
 - [ ] Field discovery endpoint returns mapped fields
 

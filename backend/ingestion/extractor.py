@@ -18,6 +18,7 @@ import structlog
 
 from config import get_settings
 from jira_connector.client import JiraClient
+from jira_connector.fields import FieldDiscoverer
 from storage.database import get_db
 from storage.models import (
     DimProject, DimUser, DimComponent, DimVersion, DimSprint,
@@ -75,6 +76,13 @@ class JiraExtractor:
             "transitions": 0,
             "errors": 0,
         }
+        self._field_map: dict[str, str] | None = None
+
+    async def _get_field_map(self) -> dict[str, str]:
+        if self._field_map is None:
+            discoverer = FieldDiscoverer(self.client)
+            self._field_map = await discoverer.get_field_map()
+        return self._field_map
 
     async def run_full_extraction(self, triggered_by: str = "manual") -> str:
         """
@@ -198,8 +206,9 @@ class JiraExtractor:
 
     async def _extract_issues_by_jql(self, project_key: str, jql: str) -> None:
         batch = []
-        async for raw_issue in self.client.search_issues(jql):
-            issue_model = self._transform_issue(raw_issue, project_key)
+        field_map = await self._get_field_map()
+        async for raw_issue in self.client.search_issues(jql, field_map=field_map):
+            issue_model = self._transform_issue(raw_issue, project_key, field_map)
             batch.append((issue_model, raw_issue))
 
             if len(batch) >= 50:
@@ -284,7 +293,12 @@ class JiraExtractor:
 
     # ─── Transform ────────────────────────────────────────────────────────────
 
-    def _transform_issue(self, raw: dict, project_key: str) -> FactIssue:
+    def _transform_issue(self, raw: dict, project_key: str, field_map: dict[str, str] | None = None) -> FactIssue:
+        fm = field_map or {}
+        sprint_field = fm.get("sprint") or settings.jira_field_sprint
+        epic_field = fm.get("epic_link") or settings.jira_field_epic_link
+        sp_field = fm.get("story_points") or settings.jira_field_story_points
+
         fields = raw.get("fields", {})
         now = _today_utc()
 
@@ -296,14 +310,14 @@ class JiraExtractor:
         age_days = int((now - created).days) if created else None
         days_no_update = int((now - updated).days) if updated else None
         resolution_days = _days_between(created, resolved)
-        lead_days = resolution_days  # Same as resolution time until changelog-based lead time is implemented
+        lead_days = resolution_days
         cycle_days = None  # Computed from changelog in P1
 
         assignee = fields.get("assignee") or {}
         components = fields.get("components") or []
         fix_versions = fields.get("fixVersions") or []
         labels = fields.get("labels") or []
-        sprints_raw = fields.get(settings.jira_field_sprint) or []
+        sprints_raw = fields.get(sprint_field) or []
 
         status_obj = fields.get("status") or {}
         status_name = status_obj.get("name", "")
@@ -313,11 +327,11 @@ class JiraExtractor:
         resolution_obj = fields.get("resolution") or {}
 
         epic_key = (
-            fields.get(settings.jira_field_epic_link)
+            fields.get(epic_field)
             or (fields.get("parent") or {}).get("key")
         )
 
-        story_points = fields.get(settings.jira_field_story_points)
+        story_points = fields.get(sp_field)
         if isinstance(story_points, dict):
             story_points = None
 
