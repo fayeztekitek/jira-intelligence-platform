@@ -13,6 +13,7 @@ Each job logs start/end to ExtractionRun for full audit trail.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -63,7 +64,6 @@ async def job_calculate_kpis() -> None:
     from kpi_engine.calculator import KPICalculator, IssueRecord
     from risk_engine.scorer import RiskScorer
     from ingestion.snapshot_writer import SnapshotWriter
-    import json
 
     logger.info("job_start", job="kpi_calculation")
     writer = SnapshotWriter()
@@ -126,7 +126,6 @@ async def job_snapshot_maintenance() -> None:
 def _row_to_record(row) -> "IssueRecord":
     """Convert SQLAlchemy FactIssue row to IssueRecord dataclass."""
     from kpi_engine.calculator import IssueRecord
-    import json
 
     def _parse_list(val: str | None) -> list:
         if not val:

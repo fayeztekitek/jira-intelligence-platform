@@ -331,6 +331,42 @@ let currentPeriod = '1m';
 let issueOffset = 0;
 const ISSUE_LIMIT = 50;
 let execData = null;
+let authToken = localStorage.getItem('jira_intel_token') || '';
+
+// Auth helpers
+async function ensureAuth() {
+  if (authToken) return;
+  const apiKey = prompt('Enter API key (or leave empty to use default):');
+  if (!apiKey) { authToken = 'anonymous'; return; }
+  try {
+    const r = await fetch(API + '/api/auth/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: apiKey}),
+    });
+    const data = await r.json();
+    authToken = data.access_token;
+    localStorage.setItem('jira_intel_token', authToken);
+  } catch(e) {
+    console.warn('Auth failed, continuing without auth:', e.message);
+    authToken = 'anonymous';
+  }
+}
+
+async function api(path) {
+  const headers = {};
+  if (authToken && authToken !== 'anonymous') {
+    headers['Authorization'] = `Bearer ${authToken}`;
+  }
+  const r = await fetch(API + path, { headers });
+  if (r.status === 401) {
+    localStorage.removeItem('jira_intel_token');
+    authToken = '';
+    await ensureAuth();
+    return api(path);
+  }
+  if (!r.ok) throw new Error(`API error ${r.status}`);
+  return r.json();
+}
 
 // ─── Navigation ───────────────────────────────────────────────────────────────
 function showPage(name) {
@@ -368,6 +404,8 @@ async function getKPIs(category = null) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
+  await ensureAuth();
+
   // Load projects
   const projects = await api('/api/projects');
   const sel = document.getElementById('projectFilter');
@@ -590,43 +628,72 @@ async function loadDelivery() {
     </div>
   `;
 
-  setTimeout(() => {
+  setTimeout(async () => {
     const periods = ['1w','2w','3w','4w','1m','3m','6m','9m','1y'];
-    renderCreatedResolved(periods, data);
-    renderResolutionTime();
+    await renderCreatedResolved(periods, data);
+    await renderResolutionTime();
   }, 50);
 }
 
-function renderCreatedResolved(periods, data) {
+async function renderCreatedResolved(periods, data) {
   const el = document.getElementById('chart-flow');
   if (!el) return;
+
+  // Fetch actual history data
+  const proj = currentProject || (execData?.projects?.[0]?.key || 'CORE');
+  let createdData = [], resolvedData = [], labels = [];
+  try {
+    const c = await api(`/api/kpis/history?project_key=${proj}&kpi_name=issues_created&period=1m&days=90`);
+    const r = await api(`/api/kpis/history?project_key=${proj}&kpi_name=issues_resolved&period=1m&days=90`);
+    labels = (c.history || []).map(h => h.date.slice(5));
+    createdData = (c.history || []).map(h => h.value);
+    resolvedData = (r.history || []).map(h => h.value);
+  } catch(e) { /* fallback to empty */ }
+
+  if (!labels.length) {
+    labels = ['No data']; createdData = [0]; resolvedData = [0];
+  }
+
   const chart = echarts.init(el);
   chart.setOption({
     backgroundColor:'transparent',
     tooltip:{trigger:'axis'},
     legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
-    xAxis:{type:'category',data:periods,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:labels,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11,rotate:45}},
     yAxis:{type:'value',axisLine:{lineStyle:{color:'#2e3248'}},splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
     series:[
-      {name:'Created',type:'bar',data:[12,25,36,48,58,180,330,420,540],itemStyle:{color:'#3b82f6',borderRadius:[3,3,0,0]}},
-      {name:'Resolved',type:'bar',data:[8,18,28,38,45,140,260,340,430],itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
+      {name:'Created',type:'bar',data:createdData,itemStyle:{color:'#3b82f6',borderRadius:[3,3,0,0]}},
+      {name:'Resolved',type:'bar',data:resolvedData,itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
     ],
   });
 }
 
-function renderResolutionTime() {
+async function renderResolutionTime() {
   const el = document.getElementById('chart-restime');
   if (!el) return;
+  const proj = currentProject || (execData?.projects?.[0]?.key || 'CORE');
+
+  let avgData = [], medData = [], labels = [];
+  try {
+    const a = await api(`/api/kpis/history?project_key=${proj}&kpi_name=avg_resolution_days&period=1m&days=90`);
+    const m = await api(`/api/kpis/history?project_key=${proj}&kpi_name=median_resolution_days&period=1m&days=90`);
+    labels = (a.history || []).map(h => h.date.slice(5));
+    avgData = (a.history || []).map(h => h.value);
+    medData = (m.history || []).map(h => h.value);
+  } catch(e) {}
+
+  if (!labels.length) { labels = ['No data']; avgData = [0]; medData = [0]; }
+
   const chart = echarts.init(el);
   chart.setOption({
     backgroundColor:'transparent',
     tooltip:{trigger:'axis'},
     legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
-    xAxis:{type:'category',data:['1w','2w','4w','1m','3m','6m','1y'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:labels,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11,rotate:45}},
     yAxis:{type:'value',name:'Days',axisLabel:{color:'#8892a4',fontSize:11},splitLine:{lineStyle:{color:'#1e2235'}}},
     series:[
-      {name:'Avg Resolution',type:'line',data:[8,10,12,14,15,14,15],smooth:true,itemStyle:{color:'#f59e0b'},lineStyle:{color:'#f59e0b'}},
-      {name:'Median',type:'line',data:[6,7,9,10,11,10,11],smooth:true,itemStyle:{color:'#8b5cf6'},lineStyle:{color:'#8b5cf6'}},
+      {name:'Avg Resolution',type:'line',data:avgData,smooth:true,itemStyle:{color:'#f59e0b'},lineStyle:{color:'#f59e0b'}},
+      {name:'Median',type:'line',data:medData,smooth:true,itemStyle:{color:'#8b5cf6'},lineStyle:{color:'#8b5cf6'}},
     ],
   });
 }
@@ -682,29 +749,54 @@ async function loadQuality() {
       <div id="chart-priority" class="chart-body"></div>
     </div>
   `;
-  setTimeout(() => { renderBugTrend(); renderPriorityDonut(); }, 50);
+  setTimeout(async () => { await renderBugTrend(); await renderPriorityDonut(); }, 50);
 }
 
-function renderBugTrend() {
+async function renderBugTrend() {
   const el = document.getElementById('chart-bugs');
   if (!el) return;
+  const proj = currentProject || (execData?.projects?.[0]?.key || 'CORE');
+
+  let createdData = [], resolvedData = [], labels = [];
+  try {
+    const c = await api(`/api/kpis/history?project_key=${proj}&kpi_name=bugs_created&period=1m&days=90`);
+    const r = await api(`/api/kpis/history?project_key=${proj}&kpi_name=bug_resolution_rate&period=1m&days=90`);
+    labels = (c.history || []).map(h => h.date.slice(5));
+    createdData = (c.history || []).map(h => h.value);
+    resolvedData = (r.history || []).map(h => h.value);
+  } catch(e) {}
+
+  if (!labels.length) { labels = ['No data']; createdData = [0]; resolvedData = [0]; }
+
   const chart = echarts.init(el);
   chart.setOption({
     backgroundColor:'transparent',
     tooltip:{trigger:'axis'},
     legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
-    xAxis:{type:'category',data:['1w','2w','4w','1m','3m','6m','1y'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:labels,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11,rotate:45}},
     yAxis:{type:'value',splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
     series:[
-      {name:'Created',type:'bar',data:[4,8,12,18,55,110,135],itemStyle:{color:'#ef4444',borderRadius:[3,3,0,0]}},
-      {name:'Resolved',type:'bar',data:[3,6,9,14,40,85,110],itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
+      {name:'Bugs Created',type:'bar',data:createdData,itemStyle:{color:'#ef4444',borderRadius:[3,3,0,0]}},
+      {name:'Resolved Rate %',type:'line',data:resolvedData,itemStyle:{color:'#22c55e'},lineStyle:{color:'#22c55e'}},
     ],
   });
 }
 
-function renderPriorityDonut() {
+async function renderPriorityDonut() {
   const el = document.getElementById('chart-priority');
   if (!el) return;
+  const proj = currentProject || (execData?.projects?.[0]?.key || 'CORE');
+
+  // Get priority counts from issues endpoint
+  let data = [];
+  try {
+    const issues = await api(`/api/projects/${proj}/issues?limit=500`);
+    const counts = {Critical:0, Blocker:0, High:0, Medium:0, Low:0, Highest:0, Major:0, Minor:0, Trivial:0};
+    issues.issues.forEach(i => { if (i.priority && counts[i.priority] !== undefined) counts[i.priority]++; });
+    const colorMap = {Critical:'#ef4444', Blocker:'#dc2626', Highest:'#ef4444', High:'#f59e0b', Major:'#f59e0b', Medium:'#3b82f6', Low:'#22c55e', Minor:'#22c55e', Trivial:'#6b7280'};
+    data = Object.entries(counts).filter(([,v]) => v > 0).map(([k,v]) => ({value:v, name:k, itemStyle:{color:colorMap[k]||'#3b82f6'}}));
+  } catch(e) { data = [{value:1, name:'No data', itemStyle:{color:'#3b82f6'}}]; }
+
   const chart = echarts.init(el);
   chart.setOption({
     backgroundColor:'transparent',
@@ -713,12 +805,7 @@ function renderPriorityDonut() {
     series:[{
       type:'pie', radius:['45%','72%'],
       label:{show:false},
-      data:[
-        {value:12,name:'Critical',itemStyle:{color:'#ef4444'}},
-        {value:28,name:'High',    itemStyle:{color:'#f59e0b'}},
-        {value:45,name:'Medium',  itemStyle:{color:'#3b82f6'}},
-        {value:15,name:'Low',     itemStyle:{color:'#22c55e'}},
-      ],
+      data: data,
     }],
   });
 }
@@ -790,24 +877,33 @@ async function loadRisk() {
       <div id="chart-risk-radar" class="chart-body"></div>
     </div>
   `;
-  setTimeout(() => {
-    renderRiskTrend(risk);
+  setTimeout(async () => {
+    await renderRiskTrend(risk);
     if (risk) renderRiskRadar(risk);
   }, 50);
 }
 
-function renderRiskTrend(risk) {
+async function renderRiskTrend(risk) {
   const el = document.getElementById('chart-risk-trend');
   if (!el) return;
+  const proj = currentProject || (execData?.projects?.[0]?.key || 'CORE');
+
+  let data = [], labels = [];
+  try {
+    const h = await api(`/api/kpis/history?project_key=${proj}&kpi_name=composite_risk&period=1m&days=180`);
+    labels = (h.history || []).map(h => h.date.slice(5));
+    data = (h.history || []).map(h => h.value);
+  } catch(e) { labels = ['No data']; data = [0]; }
+
   const chart = echarts.init(el);
   chart.setOption({
     backgroundColor:'transparent',
     tooltip:{trigger:'axis'},
-    xAxis:{type:'category',data:['Jan','Feb','Mar','Apr','May','Jun'],axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11}},
+    xAxis:{type:'category',data:labels,axisLine:{lineStyle:{color:'#2e3248'}},axisLabel:{color:'#8892a4',fontSize:11,rotate:45}},
     yAxis:{type:'value',max:100,splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
     series:[{
       name:'Risk Score',type:'line',smooth:true,
-      data:[45,52,48,61,70,risk?.composite_score||68],
+      data:data,
       lineStyle:{color:'#ef4444',width:2},
       itemStyle:{color:'#ef4444'},
       areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(239,68,68,0.2)'},{offset:1,color:'rgba(239,68,68,0)'}]}},
@@ -927,16 +1023,26 @@ async function loadTeam() {
 
   document.getElementById('team-charts').innerHTML = `
     <div class="chart-card">
-      <div class="chart-title">Workload Distribution (simulated)</div>
+      <div class="chart-title">Workload Distribution</div>
       <div class="chart-sub">Open issues per team member</div>
       <div id="chart-workload" class="chart-body-lg"></div>
     </div>
   `;
-  setTimeout(() => {
-    const members = ['Alice M.','Bob C.','Carol W.','David K.','Emma W.','Frank D.'];
-    const loads = [28,15,34,12,22,19];
-    renderBarH('chart-workload', members, loads, loads.map(v=>v>30?'#ef4444':v>20?'#f59e0b':'#3b82f6'));
-  }, 50);
+  // Fetch actual workload data from issues
+  (async () => {
+    try {
+      const issuesData = await api(`/api/projects/${proj}/issues?limit=500`);
+      const assigneeCounts = {};
+      issuesData.issues.forEach(i => {
+        const a = i.assignee_id || 'Unassigned';
+        assigneeCounts[a] = (assigneeCounts[a] || 0) + 1;
+      });
+      const entries = Object.entries(assigneeCounts).sort((a,b) => b[1] - a[1]).slice(0, 15);
+      const names = entries.map(([k]) => k.length > 15 ? k.slice(0, 15) + '…' : k);
+      const counts = entries.map(([,v]) => v);
+      setTimeout(() => renderBarH('chart-workload', names, counts, counts.map(v=>v>30?'#ef4444':v>20?'#f59e0b':'#3b82f6')), 50);
+    } catch(e) { /* silent fallback */ }
+  })();
 }
 
 // ─── Issues ───────────────────────────────────────────────────────────────────
@@ -1006,7 +1112,9 @@ function exportCSV() {
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 async function triggerSync() {
   try {
-    await fetch(`${API}/api/sync/trigger?sync_type=incremental`, {method:'POST'});
+    const headers = {};
+    if (authToken && authToken !== 'anonymous') headers['Authorization'] = `Bearer ${authToken}`;
+    await fetch(`${API}/api/sync/trigger?sync_type=incremental`, {method:'POST', headers});
     document.getElementById('syncInfo').innerHTML = '<span class="sync-dot" style="background:var(--amber)"></span> Sync triggered…';
     setTimeout(() => init(), 5000);
   } catch(e) { alert('Sync failed: ' + e.message); }

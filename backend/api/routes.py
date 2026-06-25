@@ -22,11 +22,14 @@ import json
 from datetime import date, timedelta
 from typing import Any
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.auth import require_auth, UserSession
 from storage.database import get_db
 from storage.models import (
     DimProject, FactIssue, KPIResult, RiskScore, ExtractionRun, FactSnapshot
@@ -44,12 +47,17 @@ async def health():
     return {"status": "ok", "version": "1.0.0"}
 
 
+# ─── Auth dependency alias ────────────────────────────────────────────
+
+AuthDep = Annotated[UserSession, Depends(require_auth)]
+
+
 # ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
 
 @router.get("/projects")
-async def list_projects():
+async def list_projects(user: AuthDep):
     async with get_db() as db:
         rows = (await db.execute(
             select(DimProject).where(DimProject.is_active == True)
@@ -68,7 +76,7 @@ async def list_projects():
 
 
 @router.get("/projects/{project_key}")
-async def get_project(project_key: str):
+async def get_project(project_key: str, user: AuthDep):
     async with get_db() as db:
         proj = (await db.execute(
             select(DimProject).where(DimProject.id == project_key)
@@ -90,6 +98,7 @@ async def get_project(project_key: str):
 
 @router.get("/projects/{project_key}/kpis")
 async def get_project_kpis(
+    user: AuthDep,
     project_key: str,
     period: str = Query("1m", description="Period: 1d|1w|2w|3w|4w|1m|3m|6m|9m|1y"),
     category: str | None = Query(None, description="Filter by category"),
@@ -143,6 +152,7 @@ async def get_project_kpis(
 
 @router.get("/kpis/history")
 async def get_kpi_history(
+    user: AuthDep,
     project_key: str = Query(...),
     kpi_name: str = Query(...),
     period: str = Query("1m"),
@@ -183,6 +193,7 @@ async def get_kpi_history(
 
 @router.get("/projects/{project_key}/risk")
 async def get_project_risk(
+    user: AuthDep,
     project_key: str,
     as_of: str | None = Query(None),
 ):
@@ -226,6 +237,7 @@ async def get_project_risk(
 
 @router.get("/projects/{project_key}/issues")
 async def get_project_issues(
+    user: AuthDep,
     project_key: str,
     status: str | None = Query(None),
     issue_type: str | None = Query(None),
@@ -290,7 +302,7 @@ async def get_project_issues(
 # ---------------------------------------------------------------------------
 
 @router.get("/executive/summary")
-async def executive_summary():
+async def executive_summary(user: AuthDep):
     """
     Top-level executive view answering: What happened? Why? Risk? Impact? Action?
     """
@@ -301,23 +313,25 @@ async def executive_summary():
         projects = (await db.execute(
             select(DimProject).where(DimProject.is_active == True)
         )).scalars().all()
+        project_keys = [p.id for p in projects]
 
-        # Latest risk scores
-        risk_rows = []
-        for p in projects:
-            subq = (
-                select(func.max(RiskScore.calculation_date))
-                .where(RiskScore.project_key == p.id)
-                .scalar_subquery()
+        # Latest risk scores — batch load with a single query
+        latest_date_subq = (
+            select(
+                RiskScore.project_key,
+                func.max(RiskScore.calculation_date).label("max_date")
             )
-            r = (await db.execute(
-                select(RiskScore).where(
-                    RiskScore.project_key == p.id,
-                    RiskScore.calculation_date == subq,
-                )
-            )).scalar_one_or_none()
-            if r:
-                risk_rows.append(r)
+            .where(RiskScore.project_key.in_(project_keys))
+            .group_by(RiskScore.project_key)
+            .subquery()
+        )
+        risk_rows = (await db.execute(
+            select(RiskScore).join(
+                latest_date_subq,
+                (RiskScore.project_key == latest_date_subq.c.project_key) &
+                (RiskScore.calculation_date == latest_date_subq.c.max_date)
+            )
+        )).scalars().all()
 
         # Issue stats
         total_open = (await db.execute(
@@ -420,7 +434,10 @@ def _build_alerts(overdue: int, critical: int, unassigned: int, risk: float) -> 
 # ---------------------------------------------------------------------------
 
 @router.post("/sync/trigger")
-async def trigger_sync(sync_type: str = Query("incremental", description="incremental|full")):
+async def trigger_sync(
+    user: AuthDep,
+    sync_type: str = Query("incremental", description="incremental|full"),
+):
     """Manually trigger a sync (runs in background)."""
     import asyncio
     from scheduler.jobs import job_incremental_extraction, job_full_sync
@@ -434,7 +451,7 @@ async def trigger_sync(sync_type: str = Query("incremental", description="increm
 
 
 @router.get("/sync/status")
-async def sync_status(limit: int = Query(10)):
+async def sync_status(user: AuthDep, limit: int = Query(10)):
     async with get_db() as db:
         rows = (await db.execute(
             select(ExtractionRun)
@@ -468,6 +485,7 @@ async def sync_status(limit: int = Query(10)):
 
 @router.get("/export/csv")
 async def export_issues_csv(
+    user: AuthDep,
     project_key: str = Query(...),
     issue_type: str | None = Query(None),
     status: str | None = Query(None),

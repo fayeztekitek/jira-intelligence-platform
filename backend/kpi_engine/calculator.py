@@ -18,6 +18,7 @@ Categories:
 """
 from __future__ import annotations
 
+import bisect
 import json
 import statistics
 from dataclasses import dataclass, field
@@ -209,6 +210,24 @@ class KPICalculator:
         self.as_of = as_of or date.today()
         self._result = ProjectKPIs(project_key=project_key, calculated_at=self.as_of)
 
+        # Pre-sort for binary search windowing (O(n log n) once vs O(n×p) for each period)
+        self._sorted_by_created = sorted(
+            [i for i in issues if i.created_date],
+            key=lambda x: x.created_date.date() if hasattr(x.created_date, "date") else x.created_date,
+        )
+        self._sorted_by_resolved = sorted(
+            [i for i in issues if i.resolved_date],
+            key=lambda x: x.resolved_date.date() if hasattr(x.resolved_date, "date") else x.resolved_date,
+        )
+        self._created_dates = [
+            i.created_date.date() if hasattr(i.created_date, "date") else i.created_date
+            for i in self._sorted_by_created
+        ]
+        self._resolved_dates = [
+            i.resolved_date.date() if hasattr(i.resolved_date, "date") else i.resolved_date
+            for i in self._sorted_by_resolved
+        ]
+
     def calculate_all(self) -> ProjectKPIs:
         for label, days in PERIODS:
             window_end = self.as_of
@@ -230,42 +249,36 @@ class KPICalculator:
         return self._result
 
     # -----------------------------------------------------------------------
-    # Window helpers
+    # Optimized window helpers (binary search)
     # -----------------------------------------------------------------------
 
+    def _bisect_range(self, dates: list, sorted_items: list, start: date, end: date) -> list:
+        """Return items where the corresponding date is in [start, end)."""
+        lo = bisect.bisect_left(dates, start)
+        hi = bisect.bisect_left(dates, end)
+        return sorted_items[lo:hi]
+
     def _window(self, start: date, end: date) -> list[IssueRecord]:
-        """Issues created within [start, end)."""
-        result = []
-        for i in self.issues:
-            if i.created_date:
-                cd = i.created_date.date() if hasattr(i.created_date, "date") else i.created_date
-                if start <= cd < end:
-                    result.append(i)
-        return result
+        """Issues created within [start, end) — O(log n + k)."""
+        return self._bisect_range(self._created_dates, self._sorted_by_created, start, end)
 
     def _resolved_in(self, start: date, end: date) -> list[IssueRecord]:
-        result = []
-        for i in self.issues:
-            if i.resolved_date:
-                rd = i.resolved_date.date() if hasattr(i.resolved_date, "date") else i.resolved_date
-                if start <= rd < end:
-                    result.append(i)
-        return result
+        """Issues resolved within [start, end) — O(log n + k)."""
+        return self._bisect_range(self._resolved_dates, self._sorted_by_resolved, start, end)
 
     def _open_as_of(self, as_of_date: date) -> list[IssueRecord]:
+        """Issues that were open (created before and not resolved before) as of as_of_date."""
+        # Use binary search to get only issues created before as_of_date
+        lo = bisect.bisect_left(self._created_dates, as_of_date)
+        candidates = self._sorted_by_created[:lo]
+
         result = []
-        for i in self.issues:
-            created = i.created_date
-            if created is None:
-                continue
-            cd = created.date() if hasattr(created, "date") else created
-            if cd > as_of_date:
-                continue
+        for i in candidates:
             if i.resolved_date is None:
                 result.append(i)
             else:
                 rd = i.resolved_date.date() if hasattr(i.resolved_date, "date") else i.resolved_date
-                if rd > as_of_date:
+                if rd >= as_of_date:
                     result.append(i)
         return result
 
@@ -872,31 +885,33 @@ class KPICalculator:
         days = next(d for l, d in PERIODS if l == label)
         wend = self.as_of
         wstart = self.as_of - timedelta(days=days)
+        prev_end = wstart
+        prev_start = wstart - timedelta(days=days)
 
         open_now = self._open_as_of(wend)
+        open_prev = self._open_as_of(wstart)
         resolved_now = self._resolved_in(wstart, wend)
+        resolved_prev = self._resolved_in(prev_start, prev_end)
 
-        # --- Workload by assignee ---
-        assignee_open: dict[str, int] = {}
-        for i in open_now:
-            if i.assignee_id:
-                assignee_open[i.assignee_id] = assignee_open.get(i.assignee_id, 0) + 1
+        def _load_stats(open_issues):
+            ao = {}
+            for i in open_issues:
+                if i.assignee_id:
+                    ao[i.assignee_id] = ao.get(i.assignee_id, 0) + 1
+            if ao:
+                vals = list(ao.values())
+                return max(vals), round(max(vals) / statistics.mean(vals), 2) if statistics.mean(vals) > 0 else None
+            return 0, None
 
-        if assignee_open:
-            values = list(assignee_open.values())
-            max_load = max(values)
-            avg_load = statistics.mean(values)
-            imbalance = round(max_load / avg_load, 2) if avg_load > 0 else None
-        else:
-            max_load = 0
-            imbalance = None
+        cur_max, cur_imb = _load_stats(open_now)
+        prev_max, prev_imb = _load_stats(open_prev)
 
         self._add(KPIValue(
             name="max_assignee_load",
             category="team",
             period_label=label,
-            current_value=max_load,
-            previous_value=None,
+            current_value=cur_max,
+            previous_value=prev_max,
             unit="count",
             formula="MAX(open_issues per assignee)",
             interpretation="Highest individual workload. Indicates potential bottleneck.",
@@ -909,8 +924,8 @@ class KPICalculator:
             name="workload_imbalance_ratio",
             category="team",
             period_label=label,
-            current_value=imbalance,
-            previous_value=None,
+            current_value=cur_imb,
+            previous_value=prev_imb,
             unit="ratio",
             formula="max_assignee_load / avg_assignee_load",
             interpretation="Ratio >3 indicates severe workload imbalance.",
@@ -921,12 +936,13 @@ class KPICalculator:
 
         # --- Active contributors ---
         contributors = set(i.assignee_id for i in resolved_now if i.assignee_id)
+        prev_contributors = set(i.assignee_id for i in resolved_prev if i.assignee_id)
         self._add(KPIValue(
             name="active_contributors",
             category="team",
             period_label=label,
             current_value=len(contributors),
-            previous_value=None,
+            previous_value=len(prev_contributors),
             unit="count",
             formula="COUNT(DISTINCT assignee_id for issues resolved in period)",
             interpretation="Number of people actively resolving issues.",
@@ -935,12 +951,13 @@ class KPICalculator:
 
         # --- Unassigned open ---
         unassigned = [i for i in open_now if not i.assignee_id]
+        prev_unassigned = [i for i in open_prev if not i.assignee_id]
         self._add(KPIValue(
             name="unassigned_open_pct",
             category="team",
             period_label=label,
             current_value=self._safe_pct(len(unassigned), len(open_now) or 1),
-            previous_value=None,
+            previous_value=self._safe_pct(len(prev_unassigned), len(open_prev) or 1),
             unit="%",
             formula="unassigned_open / total_open × 100",
             interpretation="Percentage of open work with no owner.",

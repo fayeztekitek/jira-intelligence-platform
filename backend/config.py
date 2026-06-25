@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # App
     app_env: Literal["development", "staging", "production"] = "development"
     app_secret_key: str = "dev_secret_key_change_in_production"
+    allowed_origins: str = "*"                    # comma-separated: https://app.company.com,https://admin.company.com
     log_level: str = "INFO"
     audit_log_path: str = "./logs/audit.log"
 
@@ -42,6 +43,11 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     extract_cron_daily: str = "0 2 * * *"
     snapshot_retention_days: int = 400
+
+    # Jira customfield IDs (differ per Jira instance)
+    jira_field_epic_link: str = "customfield_10014"
+    jira_field_story_points: str = "customfield_10016"
+    jira_field_sprint: str = "customfield_10020"
 
     # Features
     enable_nlp_analysis: bool = False

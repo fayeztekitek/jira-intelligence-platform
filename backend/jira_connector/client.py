@@ -105,7 +105,11 @@ class JiraClient:
 
         # Handle rate limiting
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", "60"))
+            raw_retry = resp.headers.get("Retry-After", "60")
+            try:
+                retry_after = int(raw_retry)
+            except (ValueError, TypeError):
+                retry_after = 60
             log.warning("jira_rate_limited", retry_after=retry_after)
             await asyncio.sleep(retry_after)
             raise JiraAPIError(429, "Rate limited")
@@ -193,13 +197,18 @@ class JiraClient:
         expand: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Stream all issues matching a JQL query."""
+        # Use configurable field IDs from settings
+        s = self.settings
+        epic_field = s.jira_field_epic_link
+        sp_field = s.jira_field_story_points
+        sprint_field = s.jira_field_sprint
         default_fields = [
             "summary", "description", "issuetype", "status", "priority",
             "assignee", "reporter", "created", "updated", "resolutiondate",
             "duedate", "resolution", "labels", "components", "fixVersions",
-            "customfield_10014",  # Epic Link
-            "customfield_10016",  # Story Points
-            "customfield_10020",  # Sprint
+            epic_field,           # Epic Link
+            sp_field,             # Story Points
+            sprint_field,         # Sprint
             "parent", "subtasks", "timespent", "timeoriginalestimate",
             "comment",
         ]
@@ -257,14 +266,15 @@ class JiraClient:
     # ─── Users ────────────────────────────────────────────────────────────────
 
     async def get_users(self, project_key: str) -> list[dict]:
-        users = []
-        async for u in self.paginate(
+        """Fetch assignable users for a project."""
+        data = await self._request(
+            "GET",
             "/rest/api/2/user/assignable/multiProjectSearch",
-            params={"projectKeys": project_key},
-            results_key="",  # returns array directly
-        ):
-            users.append(u)
-        return users
+            params={"projectKeys": project_key, "maxResults": 1000},
+        )
+        if isinstance(data, list):
+            return data
+        return data.get("values", []) if isinstance(data, dict) else []
 
     async def server_info(self) -> dict:
         """Returns Jira server info — used to detect Cloud vs Data Center."""

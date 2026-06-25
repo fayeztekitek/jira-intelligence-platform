@@ -197,9 +197,6 @@ class JiraExtractor:
             logger.warning("metadata_extraction_partial", project=project_key, error=str(e))
 
     async def _extract_issues_by_jql(self, project_key: str, jql: str) -> None:
-        async with self.client as _:
-            pass  # ensure client stays open
-
         batch = []
         async for raw_issue in self.client.search_issues(jql):
             issue_model = self._transform_issue(raw_issue, project_key)
@@ -299,12 +296,14 @@ class JiraExtractor:
         age_days = int((now - created).days) if created else None
         days_no_update = int((now - updated).days) if updated else None
         resolution_days = _days_between(created, resolved)
+        lead_days = resolution_days  # Same as resolution time until changelog-based lead time is implemented
+        cycle_days = None  # Computed from changelog in P1
 
         assignee = fields.get("assignee") or {}
         components = fields.get("components") or []
         fix_versions = fields.get("fixVersions") or []
         labels = fields.get("labels") or []
-        sprints_raw = fields.get("customfield_10020") or []
+        sprints_raw = fields.get(settings.jira_field_sprint) or []
 
         status_obj = fields.get("status") or {}
         status_name = status_obj.get("name", "")
@@ -314,11 +313,11 @@ class JiraExtractor:
         resolution_obj = fields.get("resolution") or {}
 
         epic_key = (
-            fields.get("customfield_10014")
+            fields.get(settings.jira_field_epic_link)
             or (fields.get("parent") or {}).get("key")
         )
 
-        story_points = fields.get("customfield_10016")
+        story_points = fields.get(settings.jira_field_story_points)
         if isinstance(story_points, dict):
             story_points = None
 
@@ -366,6 +365,8 @@ class JiraExtractor:
             resolved_date=resolved,
             age_days=age_days,
             resolution_time_days=resolution_days,
+            lead_time_days=lead_days,
+            cycle_time_days=cycle_days,
             is_overdue=is_overdue,
             days_without_update=days_no_update,
             dq_missing_assignee=dq_missing_assignee,

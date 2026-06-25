@@ -16,6 +16,7 @@ from config import get_settings
 from storage.database import init_db
 from scheduler.jobs import create_scheduler
 from api.routes import router
+from api.auth import router as auth_router
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -80,14 +81,27 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
+# Parse allowed origins from config
+_allowed = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+if settings.app_env == "production" and "*" in _allowed:
+    logger.warning("cors_allow_all_in_production",
+                   message="CORS allow_origins=['*'] in production is a security risk.")
+    # In production, require explicit origins — default to empty
+    origins = [f"https://{s}" for s in _allowed if s != "*"] or []
+else:
+    origins = _allowed
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials=bool(origins and origins != ["*"]),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+logger.info("cors_configured", origins=origins, env=settings.app_env)
+
+app.include_router(auth_router)
 app.include_router(router)
 
 # Serve frontend static files if they exist

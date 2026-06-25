@@ -162,7 +162,7 @@ class SnapshotWriter:
                 "wip": get_val("wip", p) or 0,
                 "overdue_count": get_val("overdue_count", p) or 0,
                 "bugs_created": get_val("bugs_created", p) or 0,
-                "bugs_resolved": 0,
+                "bugs_resolved": get_val("bugs_resolved", p) or 0,
                 "bug_resolution_rate": get_val("bug_resolution_rate", p) or 0.0,
                 "reopened_count": get_val("reopened_count", p) or 0,
                 "reopen_rate": get_val("reopen_rate", p) or 0.0,
@@ -184,12 +184,14 @@ class SnapshotWriter:
                 db.add(FactSnapshot(**row_data))
 
     async def purge_old_snapshots(self, retention_days: int = 400) -> int:
-        """Delete snapshots older than retention_days."""
+        """Delete snapshots older than retention_days from all historical tables."""
         cutoff = date.today() - timedelta(days=retention_days)
+        total = 0
         async with get_db() as db:
-            result = await db.execute(
-                delete(KPIResult).where(KPIResult.calculation_date < cutoff)
-            )
-            deleted = result.rowcount
-        logger.info("snapshots_purged", cutoff=cutoff, deleted=deleted)
-        return deleted
+            for table in [KPIResult, FactSnapshot, RiskScore]:
+                result = await db.execute(
+                    delete(table).where(table.calculation_date < cutoff)  # type: ignore[attr-defined]
+                )
+                total += result.rowcount
+        logger.info("snapshots_purged", cutoff=cutoff, deleted=total)
+        return total
