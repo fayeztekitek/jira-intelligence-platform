@@ -466,3 +466,124 @@ class TestEdgeCases:
         for field in ["name", "category", "period_label", "current_value",
                       "delta", "trend", "risk_level", "formula"]:
             assert field in d, f"Missing field: {field}"
+
+    # ── Additional edge cases ─────────────────────────────────────────────
+
+    def test_issues_all_created_same_minute(self):
+        now = datetime.now(timezone.utc)
+        issues = [
+            IssueRecord(
+                jira_key=f"SAME-{i}", project_key="PROJ", summary=f"Same {i}",
+                issue_type="Story", status="Done", status_category="Done",
+                priority="Medium", assignee_id="u001",
+                component_ids=[], fix_version_ids=[], epic_key=None,
+                created_date=now - timedelta(minutes=30),
+                resolved_date=now - timedelta(minutes=15),
+                updated_date=now - timedelta(minutes=15),
+                due_date=None, age_days=0, resolution_time_days=0.01,
+                cycle_time_days=0.01, times_reopened=0,
+                is_overdue=False, days_without_update=0,
+                current_status_age_days=0,
+                dq_missing_assignee=False, dq_missing_priority=False,
+                dq_missing_component=True, dq_missing_fix_version=True,
+                dq_missing_epic=True, dq_missing_due_date=True,
+                dq_closed_without_resolution=False,
+                story_points=None,
+            )
+            for i in range(3)
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["issues_created"].current_value == 3
+        assert kpis["issues_resolved"].current_value == 3
+
+    def test_no_created_in_window_zero_denominator(self):
+        issues = [make_issue("OLD-1", created_offset=60, resolved_offset=55)]
+        kpis = calc(issues, "1m")
+        assert kpis["issues_created"].current_value == 0
+        assert kpis["resolution_rate"].current_value == 0.0
+
+    def test_zero_story_points_excluded_from_delivered(self):
+        issues = [
+            make_issue("ZSP-1", story_points=0.0),
+            make_issue("ZSP-2", story_points=None),
+            make_issue("ZSP-3", story_points=5.0),
+        ]
+        kpis_obj = KPICalculator("PROJ", issues).calculate_all()
+        sp = next(
+            (k for k in kpis_obj.kpis
+             if k.name == "story_points_delivered" and k.period_label == "1m"),
+            None,
+        )
+        assert sp is not None
+        assert sp.current_value == 5.0
+
+    def test_all_overdue_issues(self):
+        issues = [
+            make_issue(f"O-{i}", status="In Progress", status_category="In Progress",
+                       resolved_offset=None, resolution_days=None, cycle_days=None,
+                       is_overdue=True, due_offset=-5)
+            for i in range(5)
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["overdue_count"].current_value == 5
+
+    def test_all_to_do_none_resolved(self):
+        issues = [
+            make_issue(f"TD-{i}", status="To Do", status_category="To Do",
+                       resolved_offset=None, resolution_days=None,
+                       cycle_days=None)
+            for i in range(4)
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["issues_created"].current_value == 4
+        assert kpis["issues_resolved"].current_value == 0
+        assert kpis["backlog_size"].current_value == 4
+
+    def test_negative_resolution_days_does_not_crash(self):
+        issues = [make_issue("NEG-1", resolution_days=-5.0)]
+        kpis = calc(issues, "1m")
+        assert kpis["avg_resolution_days"].current_value == -5.0
+        assert kpis["median_resolution_days"].current_value == -5.0
+
+    def test_all_dq_flags_penalize_score(self):
+        issues = [
+            IssueRecord(
+                jira_key=f"DQ-BAD-{i}", project_key="PROJ",
+                summary=f"Bad {i}", issue_type="Story",
+                status="To Do", status_category="To Do",
+                priority=None, assignee_id=None,
+                component_ids=[], fix_version_ids=[], epic_key=None,
+                created_date=datetime.now(timezone.utc) - timedelta(days=5),
+                resolved_date=None, updated_date=None,
+                due_date=None, age_days=5, resolution_time_days=None,
+                cycle_time_days=None, times_reopened=0,
+                is_overdue=False, days_without_update=5,
+                current_status_age_days=5,
+                dq_missing_assignee=True, dq_missing_priority=True,
+                dq_missing_component=True, dq_missing_fix_version=True,
+                dq_missing_epic=True, dq_missing_due_date=True,
+                dq_closed_without_resolution=False,
+                story_points=None,
+            )
+            for i in range(3)
+        ]
+        kpis_obj = KPICalculator("PROJ", issues).calculate_all()
+        dq = next(
+            (k for k in kpis_obj.kpis
+             if k.name == "dq_score" and k.period_label == "1m"),
+            None,
+        )
+        assert dq is not None
+        # 6 of 7 DQ fields penalize (closed_without_resolution only applies to Done issues)
+        assert dq.current_value < 20.0
+
+    def test_as_of_before_all_issues(self):
+        future = date(2030, 1, 1)
+        issues = [make_issue("FUT-1")]
+        c = KPICalculator("PROJ", issues, as_of=future)
+        result = c.calculate_all()
+        assert len(result.kpis) > 0
+        cr = next((k for k in result.kpis if k.name == "issues_created"
+                    and k.period_label == "1m"), None)
+        assert cr is not None
+        assert cr.current_value == 0

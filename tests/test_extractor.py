@@ -87,6 +87,23 @@ def _mock_issue(
     }
 
 
+def _mock_comments(reporter_id: str = "user-2") -> list[dict]:
+    """Return a list of mock comments. Reporter comments first, then a reply."""
+    reporter_comment = {
+        "id": "10100",
+        "author": {"accountId": reporter_id, "displayName": "Reporter"},
+        "body": "Created this issue for tracking",
+        "created": (TWO_WEEKS_AGO + timedelta(hours=1)).isoformat(),
+    }
+    reply_comment = {
+        "id": "10101",
+        "author": {"accountId": "user-3", "displayName": "Dev Two"},
+        "body": "Looking into this now",
+        "created": (TWO_WEEKS_AGO + timedelta(days=1)).isoformat(),
+    }
+    return [reporter_comment, reply_comment]
+
+
 def _mock_changelog(issue_key: str) -> list[dict]:
     return [
         {
@@ -225,6 +242,7 @@ class MockJiraClient:
             "TEST": [_mock_issue("TEST-1"), _mock_issue("TEST-2", status="In Progress", resolved=None)],
         }
         self.changelogs: dict[str, list] = {}
+        self.comments: dict[str, list] = {}
         self.versions: list[dict] = []
         self.components: list[dict] = []
         self.boards: list[dict] = []
@@ -248,6 +266,9 @@ class MockJiraClient:
     async def get_issue_changelog(self, issue_key):
         return self.changelogs.get(issue_key, [])
 
+    async def get_issue_comments(self, issue_key):
+        return self.comments.get(issue_key, [])
+
     async def get_versions(self, project_key):
         return self.versions
 
@@ -269,7 +290,7 @@ class MockJiraClient:
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture(scope="function")
 async def test_engine():
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -297,6 +318,7 @@ def _patch_settings():
         mock.jira_field_sprint = "customfield_10020"
         mock.jira_field_epic_link = "customfield_10014"
         mock.jira_field_story_points = "customfield_10016"
+        mock.jira_in_progress_statuses = "In Progress"
         yield
 
 
@@ -422,3 +444,144 @@ class TestEdgeCases:
         await extractor.run_full_extraction(triggered_by="test")
         assert extractor.stats["issues"] == 0
         assert extractor.stats["updated"] == 0
+
+
+class TestCycleTime:
+    """Tests for _compute_cycle_time via _flush_issue_batch."""
+
+    async def test_cycle_time_computed(self, extractor: JiraExtractor, test_session):
+        extractor.client.changelogs["CYCLE-1"] = _mock_changelog("CYCLE-1")
+        raw = _mock_issue("CYCLE-1", status="Done", resolved=YESTERDAY)
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "CYCLE-1")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None, "Issue should exist in DB"
+        assert row.cycle_time_days is not None, f"cycle_time_days is None, resolved_date={row.resolved_date}"
+        assert row.cycle_time_days > 0
+
+    async def test_cycle_time_via_last_done_fallback(self, extractor: JiraExtractor, test_session):
+        extractor.client.changelogs["CYCLE-2"] = _mock_changelog("CYCLE-2")
+        raw = _mock_issue("CYCLE-2", status="In Progress", resolved=None)
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "CYCLE-2")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        # Even without resolved_date, cycle_time uses last Done transition as fallback
+        assert row.cycle_time_days is not None
+        assert row.cycle_time_days > 0
+
+    async def test_cycle_time_no_transition(self, extractor: JiraExtractor, test_session):
+        raw = _mock_issue("CYCLE-3", status="To Do", resolved=None)
+        issue = extractor._transform_issue(raw, "TEST")
+        extractor.client.changelogs = {}
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "CYCLE-3")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.cycle_time_days is None
+
+    async def test_cycle_time_counter_incremented(self, extractor: JiraExtractor, test_session):
+        extractor.client.changelogs["CYCLE-4"] = _mock_changelog("CYCLE-4")
+        raw = _mock_issue("CYCLE-4", status="Done", resolved=YESTERDAY)
+        issue = extractor._transform_issue(raw, "TEST")
+        before = extractor.stats["cycle_time_computed"]
+        await extractor._flush_issue_batch([(issue, raw)])
+        assert extractor.stats["cycle_time_computed"] == before + 1
+
+    async def test_cycle_time_lead_time_fallback(self, extractor: JiraExtractor, test_session):
+        extractor.client.changelogs["CYCLE-5"] = _mock_changelog("CYCLE-5")
+        raw = _mock_issue("CYCLE-5", status="Done", resolved=YESTERDAY)
+        issue = extractor._transform_issue(raw, "TEST")
+        issue.lead_time_days = None
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "CYCLE-5")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.lead_time_days is not None and row.lead_time_days > 0
+
+
+class TestFirstResponseDate:
+    """Tests for _compute_first_response_date via _flush_issue_batch."""
+
+    async def test_first_response_computed(self, extractor: JiraExtractor, test_session):
+        extractor.client.comments = {"RESP-1": _mock_comments()}
+        raw = _mock_issue("RESP-1", reporter={"accountId": "user-2", "displayName": "Reporter"})
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "RESP-1")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.first_response_date is not None
+
+    async def test_no_comments_returns_none(self, extractor: JiraExtractor, test_session):
+        raw = _mock_issue("RESP-2", reporter={"accountId": "user-2", "displayName": "Reporter"})
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "RESP-2")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.first_response_date is None
+
+    async def test_no_reporter_skips(self, extractor: JiraExtractor, test_session):
+        raw = _mock_issue("RESP-3", reporter=None)
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "RESP-3")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.first_response_date is None
+
+    async def test_first_response_counter(self, extractor: JiraExtractor, test_session):
+        extractor.client.comments = {"RESP-4": _mock_comments()}
+        raw = _mock_issue("RESP-4", reporter={"accountId": "user-2", "displayName": "Reporter"})
+        issue = extractor._transform_issue(raw, "TEST")
+        before = extractor.stats["first_responses_computed"]
+        await extractor._flush_issue_batch([(issue, raw)])
+        assert extractor.stats["first_responses_computed"] == before + 1
+
+    async def test_first_response_skips_reporter_comment(self, extractor: JiraExtractor, test_session):
+        extractor.client.comments = {"RESP-5": _mock_comments(reporter_id="user-2")}
+        raw = _mock_issue("RESP-5", reporter={"accountId": "user-2", "displayName": "Reporter"})
+        issue = extractor._transform_issue(raw, "TEST")
+        await extractor._flush_issue_batch([(issue, raw)])
+
+        from sqlalchemy import select
+        result = await test_session.execute(
+            select(FactIssue).where(FactIssue.jira_key == "RESP-5")
+        )
+        row = result.scalar_one_or_none()
+        assert row is not None
+        assert row.first_response_date is not None
+        # First non-reporter comment is user-3 (Dev Two) at TWO_WEEKS_AGO + 1d
+        # Never equals the reporter's comment time (TWO_WEEKS_AGO + 1h)
+

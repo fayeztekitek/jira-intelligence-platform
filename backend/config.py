@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     jira_field_story_points: str = "customfield_10016"
     jira_field_sprint: str = "customfield_10020"
 
+    # Cycle / lead time computation
+    jira_in_progress_statuses: str = "In Progress"
+
     # Features
     enable_nlp_analysis: bool = False
     enable_duplicate_detection: bool = False

@@ -75,6 +75,8 @@ class JiraExtractor:
             "updated": 0,
             "transitions": 0,
             "errors": 0,
+            "cycle_time_computed": 0,
+            "first_responses_computed": 0,
         }
         self._field_map: dict[str, str] | None = None
 
@@ -250,8 +252,14 @@ class JiraExtractor:
                         await self._upsert_user(db, user_data)
 
         # Extract changelog separately (outside issue batch for rate limiting)
-        for issue_model, _ in batch:
+        for issue_model, raw_issue in batch:
             await self._extract_changelog(issue_model.jira_key)
+            await self._compute_cycle_time(issue_model.jira_key)
+            reporter = (raw_issue.get("fields", {}) or {}).get("reporter") or {}
+            await self._compute_first_response_date(
+                issue_model.jira_key,
+                reporter.get("accountId"),
+            )
 
     async def _extract_changelog(self, issue_key: str) -> None:
         try:
@@ -290,6 +298,117 @@ class JiraExtractor:
 
         except Exception as e:
             logger.warning("changelog_extraction_failed", issue=issue_key, error=str(e))
+
+    async def _compute_cycle_time(self, issue_key: str) -> None:
+        """Compute cycle_time_days from changelog status transitions.
+
+        cycle_time = resolved_date - first entry into an 'In Progress' status.
+        Uses configurable jira_in_progress_statuses to match status names.
+        If resolved_date is None but the issue has moved to a Done status,
+        uses the last Done transition timestamp as the end date.
+        """
+        in_progress_names = {
+            s.strip()
+            for s in settings.jira_in_progress_statuses.split(",")
+            if s.strip()
+        }
+        if not in_progress_names:
+            return
+
+        try:
+            from sqlalchemy import select
+            async with get_db() as db:
+                result = await db.execute(
+                    select(FactTransition)
+                    .where(
+                        FactTransition.jira_key == issue_key,
+                        FactTransition.field == "status",
+                    )
+                    .order_by(FactTransition.changed_at.asc())
+                )
+                transitions = result.scalars().all()
+
+            if not transitions:
+                return
+
+            first_in_progress: datetime | None = None
+            last_done: datetime | None = None
+            for t in transitions:
+                if t.to_string in in_progress_names and first_in_progress is None:
+                    first_in_progress = t.changed_at
+                if t.to_string in ("Done", "Closed", "Resolved"):
+                    last_done = t.changed_at
+
+            if first_in_progress is None:
+                return
+
+            async with get_db() as db:
+                issue = await db.execute(
+                    select(FactIssue).where(FactIssue.jira_key == issue_key)
+                )
+                issue_row = issue.scalar_one_or_none()
+                if issue_row is None:
+                    return
+
+                end = issue_row.resolved_date or last_done
+                if end is None:
+                    return
+                if isinstance(end, date) and not isinstance(end, datetime):
+                    end = datetime.combine(end, datetime.min.time())
+
+                end_utc = end.replace(tzinfo=None)
+                start_utc = first_in_progress.replace(tzinfo=None)
+                cycle = (end_utc - start_utc).total_seconds() / 86400.0
+                if cycle >= 0:
+                    issue_row.cycle_time_days = round(cycle, 2)
+                    if issue_row.lead_time_days is None and issue_row.created_date:
+                        lt_utc = issue_row.created_date.replace(tzinfo=None)
+                        lt = (end_utc - lt_utc).total_seconds() / 86400.0
+                        issue_row.lead_time_days = round(lt, 2)
+                    await db.commit()
+                    self.stats["cycle_time_computed"] += 1
+
+        except Exception as e:
+            logger.warning("cycle_time_computation_failed", issue=issue_key, error=str(e))
+
+    async def _compute_first_response_date(self, issue_key: str, reporter_id: str | None) -> None:
+        """Compute first_response_date from issue comments.
+
+        The first response is the earliest comment by someone other than the
+        reporter (first non-author reply). Sets FactIssue.first_response_date.
+        """
+        if not reporter_id:
+            return
+        try:
+            comments = await self.client.get_issue_comments(issue_key)
+            if not comments:
+                return
+
+            first_reply: datetime | None = None
+            for c in comments:
+                author = c.get("author", {})
+                if author.get("accountId") != reporter_id:
+                    first_reply = _parse_dt(c.get("created"))
+                    break
+
+            if first_reply is None:
+                return
+
+            from sqlalchemy import select
+            async with get_db() as db:
+                result = await db.execute(
+                    select(FactIssue).where(FactIssue.jira_key == issue_key)
+                )
+                issue_row = result.scalar_one_or_none()
+                if issue_row is None:
+                    return
+
+                issue_row.first_response_date = first_reply
+                await db.commit()
+                self.stats["first_responses_computed"] += 1
+
+        except Exception as e:
+            logger.warning("first_response_computation_failed", issue=issue_key, error=str(e))
 
     # ─── Transform ────────────────────────────────────────────────────────────
 

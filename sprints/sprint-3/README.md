@@ -16,10 +16,10 @@
 | ✅ Completed | S3.4 | Fix snapshot purge all tables | 1 | — |
 | ✅ Completed | S3.5 | Frontend real chart data | 10 | S3.1 |
 | ✅ Completed | S3.6 | Fix N+1 executive summary query | 3 | — |
-| 🔵 Planned | S3.7 | cycle_time_days from changelog | 5 | S2.6 |
-| 🔵 Planned | S3.8 | first_response_date from comments | 4 | — |
-| 🔵 Planned | S3.9 | KPI edge case tests | 4 | S3.1 |
-| 🔵 Planned | S3.10 | Frontend loading & error UI | 3 | S3.5 |
+| ✅ Completed | S3.7 | cycle_time_days from changelog | 5 | S2.6 |
+| ✅ Completed | S3.8 | first_response_date from comments | 4 | — |
+| ✅ Completed | S3.9 | KPI edge case tests | 4 | S3.1 |
+| ✅ Completed | S3.10 | Frontend loading & error UI | 3 | S3.5 |
 | 🔵 Planned | S3.11 | Period selector chart history | 2 | S3.5 |
 
 ## Definition of Done

@@ -141,6 +141,27 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Toast notifications ── */
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; max-width: 400px; }
+.toast { padding: 12px 18px; border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px; animation: slideIn 0.25s ease; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+.toast-error { background: #2a1515; border: 1px solid rgba(239,68,68,0.4); color: var(--red); }
+.toast-success { background: #152a1a; border: 1px solid rgba(34,197,94,0.4); color: var(--green); }
+.toast-warning { background: #2a2215; border: 1px solid rgba(245,158,11,0.4); color: var(--amber); }
+.toast-close { margin-left: auto; cursor: pointer; opacity: 0.6; font-size: 16px; }
+.toast-close:hover { opacity: 1; }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* ── Loading overlay ── */
+.loading-overlay { position: fixed; inset: 0; background: rgba(15,17,23,0.7); z-index: 9998; display: none; align-items: center; justify-content: center; }
+.loading-overlay.show { display: flex; }
+.loading-overlay .spinner { width: 32px; height: 32px; border-width: 3px; }
+
+/* ── Section loading ── */
+.section-loading { display: flex; align-items: center; justify-content: center; height: 120px; color: var(--muted); font-size: 13px; }
+.section-error { display: flex; align-items: center; justify-content: center; height: 120px; color: var(--red); font-size: 13px; flex-direction: column; gap: 8px; }
+.section-error button { background: none; border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.section-error button:hover { background: var(--surface2); }
+
 /* ── Responsive ── */
 @media (max-width: 768px) {
   .sidebar { display: none; }
@@ -253,6 +274,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
     <!-- ── RISK PAGE ── -->
     <div class="page" id="page-risk">
+      <div class="period-tabs" id="risk-periods"></div>
       <div class="risk-matrix" id="risk-dims"></div>
       <div class="kpi-grid" id="risk-kpis"></div>
       <div class="chart-grid" id="risk-charts"></div>
@@ -260,12 +282,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 
     <!-- ── DATA QUALITY PAGE ── -->
     <div class="page" id="page-dataquality">
+      <div class="period-tabs" id="dq-periods"></div>
       <div class="kpi-grid" id="dq-kpis"></div>
       <div class="chart-grid" id="dq-charts"></div>
     </div>
 
     <!-- ── TEAM PAGE ── -->
     <div class="page" id="page-team">
+      <div class="period-tabs" id="team-periods"></div>
       <div class="kpi-grid" id="team-kpis"></div>
       <div class="chart-grid" id="team-charts"></div>
     </div>
@@ -322,6 +346,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 </div><!-- /main -->
 </div><!-- /shell -->
 
+<div class="toast-container" id="toastContainer"></div>
+<div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div></div>
+
 <script>
 // ─── Config ───────────────────────────────────────────────────────────────────
 const API = '';  // Same origin; set to 'http://localhost:8000' for dev
@@ -332,22 +359,81 @@ let issueOffset = 0;
 const ISSUE_LIMIT = 50;
 let execData = null;
 let authToken = localStorage.getItem('jira_intel_token') || '';
+let loadingCount = 0;
+const pageLoaders = {};
+
+// ─── Toast & Loading ──────────────────────────────────────────────────────────
+function showToast(message, type = 'error', duration = 5000) {
+  const c = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.innerHTML = `<span>${message}</span><span class="toast-close" onclick="this.parentElement.remove()">×</span>`;
+  c.appendChild(el);
+  if (duration > 0) setTimeout(() => { if (el.parentElement) el.remove(); }, duration);
+}
+
+function setLoading(on) {
+  loadingCount += on ? 1 : -1;
+  document.getElementById('loadingOverlay').classList.toggle('show', loadingCount > 0);
+}
+
+async function api(path) {
+  const headers = {};
+  if (authToken && authToken !== 'anonymous') headers['Authorization'] = `Bearer ${authToken}`;
+  setLoading(true);
+  try {
+    const r = await fetch(API + path, { headers });
+    if (r.status === 401) {
+      localStorage.removeItem('jira_intel_token');
+      authToken = '';
+      await ensureAuth();
+      setLoading(false);
+      return api(path);
+    }
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`API error ${r.status}${body ? ': ' + body.slice(0, 100) : ''}`);
+    }
+    return r.json();
+  } catch (e) {
+    showToast(e.message, 'error', 6000);
+    throw e;
+  } finally {
+    setLoading(false);
+  }
+}
+
+function showSectionError(containerId, message, retryFn) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `<div class="section-error">
+    <span>⚠️ ${message}</span>
+    ${retryFn ? `<button onclick="(${retryFn.toString()})()">↻ Retry</button>` : ''}
+  </div>`;
+}
+
+function showSectionLoading(containerId) {
+  const el = document.getElementById(containerId);
+  if (el) el.innerHTML = '<div class="section-loading"><div class="spinner"></div> Loading…</div>';
+}
 
 // Auth helpers
 async function ensureAuth() {
   if (authToken) return;
   const apiKey = prompt('Enter API key (or leave empty to use default):');
-  if (!apiKey) { authToken = 'anonymous'; return; }
+  if (!apiKey) { authToken = 'anonymous'; showToast('Running without authentication', 'warning', 3000); return; }
   try {
     const r = await fetch(API + '/api/auth/login', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({api_key: apiKey}),
     });
+    if (!r.ok) throw new Error('Login failed: ' + r.status);
     const data = await r.json();
     authToken = data.access_token;
     localStorage.setItem('jira_intel_token', authToken);
+    showToast('Authenticated successfully', 'success', 2000);
   } catch(e) {
-    console.warn('Auth failed, continuing without auth:', e.message);
+    showToast('Auth failed, continuing without auth', 'warning', 4000);
     authToken = 'anonymous';
   }
 }
@@ -389,12 +475,6 @@ function showPage(name) {
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
-async function api(path) {
-  const r = await fetch(API + path);
-  if (!r.ok) throw new Error(`API error ${r.status}`);
-  return r.json();
-}
-
 async function getKPIs(category = null) {
   const proj = currentProject ? `&project_key=${currentProject}` : '';
   const p = currentProject ? currentProject : (execData?.projects?.[0]?.key || 'CORE');
@@ -579,13 +659,17 @@ function renderRadar() {
 // ─── Delivery ─────────────────────────────────────────────────────────────────
 async function loadDelivery() {
   buildPeriodTabs('delivery-periods', 'loadDelivery');
+  showSectionLoading('delivery-kpis');
 
   let data;
   try {
     const proj = currentProject || 'CORE';
     const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=delivery`);
     data = r.kpis || [];
-  } catch(e) { data = []; }
+  } catch(e) {
+    showSectionError('delivery-kpis', 'Failed to load delivery KPIs', () => loadDelivery());
+    data = [];
+  }
 
   const kpiNames = ['issues_created','issues_resolved','resolution_rate','avg_resolution_days',
                     'throughput','backlog_size','wip','overdue_count','aging_issues_30d'];
@@ -701,13 +785,17 @@ async function renderResolutionTime() {
 // ─── Quality ──────────────────────────────────────────────────────────────────
 async function loadQuality() {
   buildPeriodTabs('quality-periods', 'loadQuality');
+  showSectionLoading('quality-kpis');
 
   let data;
   try {
     const proj = currentProject || 'CORE';
     const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=quality`);
     data = r.kpis || [];
-  } catch(e) { data = []; }
+  } catch(e) {
+    showSectionError('quality-kpis', 'Failed to load quality KPIs', () => loadQuality());
+    data = [];
+  }
 
   const kpiNames = ['bugs_created','bug_resolution_rate','reopened_count','reopen_rate',
                     'critical_bugs_open','high_bugs_open','repeat_reopen_count'];
@@ -812,9 +900,14 @@ async function renderPriorityDonut() {
 
 // ─── Risk ─────────────────────────────────────────────────────────────────────
 async function loadRisk() {
+  buildPeriodTabs('risk-periods', 'loadRisk');
   const proj = currentProject || 'CORE';
+  showSectionLoading('risk-dims');
   let risk;
-  try { risk = await api(`/api/projects/${proj}/risk`); } catch(e) { risk = null; }
+  try { risk = await api(`/api/projects/${proj}/risk`); } catch(e) {
+    showSectionError('risk-dims', 'Failed to load risk data', () => loadRisk());
+    risk = null;
+  }
 
   if (risk) {
     const d = risk.dimensions;
@@ -940,12 +1033,16 @@ function renderRiskRadar(risk) {
 
 // ─── Data Quality ─────────────────────────────────────────────────────────────
 async function loadDataQuality() {
+  buildPeriodTabs('dq-periods', 'loadDataQuality');
   const proj = currentProject || 'CORE';
+  showSectionLoading('dq-kpis');
   let kpis = [];
   try {
     const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=data_quality`);
     kpis = r.kpis || [];
-  } catch(e) {}
+  } catch(e) {
+    showSectionError('dq-kpis', 'Failed to load data quality KPIs', () => loadDataQuality());
+  }
 
   const labels = {
     missing_assignee:'Missing Assignee',missing_priority:'Missing Priority',
@@ -993,12 +1090,16 @@ async function loadDataQuality() {
 
 // ─── Team ─────────────────────────────────────────────────────────────────────
 async function loadTeam() {
+  buildPeriodTabs('team-periods', 'loadTeam');
   const proj = currentProject || 'CORE';
+  showSectionLoading('team-kpis');
   let kpis = [];
   try {
     const r = await api(`/api/projects/${proj}/kpis?period=${currentPeriod}&category=team`);
     kpis = r.kpis || [];
-  } catch(e) {}
+  } catch(e) {
+    showSectionError('team-kpis', 'Failed to load team KPIs', () => loadTeam());
+  }
 
   const labels = {
     max_assignee_load:'Max Assignee Load',workload_imbalance_ratio:'Imbalance Ratio',
@@ -1116,8 +1217,9 @@ async function triggerSync() {
     if (authToken && authToken !== 'anonymous') headers['Authorization'] = `Bearer ${authToken}`;
     await fetch(`${API}/api/sync/trigger?sync_type=incremental`, {method:'POST', headers});
     document.getElementById('syncInfo').innerHTML = '<span class="sync-dot" style="background:var(--amber)"></span> Sync triggered…';
+    showToast('Sync triggered successfully', 'success', 3000);
     setTimeout(() => init(), 5000);
-  } catch(e) { alert('Sync failed: ' + e.message); }
+  } catch(e) { showToast('Sync failed: ' + e.message); }
 }
 
 // ─── ECharts helpers ──────────────────────────────────────────────────────────
@@ -1141,11 +1243,12 @@ function renderBarH(id, labels, values, colors) {
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 init().catch(e => {
+  showToast('Could not connect to API: ' + e.message, 'error', 0);
   document.getElementById('exec-hero').innerHTML =
     `<div style="color:var(--red);padding:20px;grid-column:1/-1">
       ⚠️ Could not connect to API. Make sure the backend is running on port 8000.<br>
       <small style="color:var(--muted)">Error: ${e.message}</small><br>
-      <small style="color:var(--muted);margin-top:8px;display:block">Run: <code>cd backend && DATABASE_URL=sqlite+aiosqlite:///./jira_test.db python main.py</code></small>
+      <button onclick="init()" style="margin-top:12px">↻ Retry</button>
     </div>`;
 });
 </script>

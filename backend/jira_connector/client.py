@@ -237,6 +237,20 @@ class JiraClient:
             entries.append(entry)
         return entries
 
+    async def get_issue_comments(self, issue_key: str) -> list[dict]:
+        """Fetch all comments for a single issue.
+
+        Returns list of comment dicts sorted by created ASC (oldest first).
+        """
+        data = await self._request(
+            "GET",
+            f"/rest/api/2/issue/{issue_key}/comment",
+            params={"orderBy": "created"},
+        )
+        if isinstance(data, dict):
+            return data.get("comments", [])
+        return []
+
     # ─── Sprints ──────────────────────────────────────────────────────────────
 
     async def get_boards(self, project_key: str) -> list[dict]:
