@@ -367,6 +367,99 @@ class RiskScore(Base):
     )
 
 
+class JiraInstance(Base):
+    """Multi-Jira instance configuration."""
+    __tablename__ = "jira_instance"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), unique=True, nullable=False)
+    base_url = Column(String(512), nullable=False)
+    auth_type = Column(String(32), nullable=False, default="api_token")
+    username = Column(String(128), nullable=True)
+    api_token = Column(String(512), nullable=True)
+    pat = Column(String(512), nullable=True)
+    project_keys = Column(Text, nullable=True)  # JSON array or null=all
+    is_active = Column(Boolean, default=True)
+    sync_enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class WebhookConfig(Base):
+    """Webhook endpoint configuration."""
+    __tablename__ = "webhook_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False)
+    url = Column(String(512), nullable=False)
+    secret = Column(String(128), nullable=True)
+    events = Column(Text, nullable=False)  # JSON array of event types
+    project_key = Column(String(64), nullable=True)  # null = all projects
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class WebhookEvent(Base):
+    """Log of webhook deliveries."""
+    __tablename__ = "webhook_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    webhook_id = Column(Integer, ForeignKey("webhook_config.id"), index=True)
+    event_type = Column(String(64), nullable=False)
+    payload = Column(Text)
+    status_code = Column(Integer, nullable=True)
+    response_body = Column(Text, nullable=True)
+    success = Column(Boolean, default=False)
+    delivered_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class User(Base):
+    """Persistent user store for RBAC."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(128), unique=True, nullable=False, index=True)
+    api_key_hash = Column(String(256), nullable=False)
+    role = Column(String(32), nullable=False, default="viewer")
+    projects = Column(Text, nullable=True)  # JSON array or null=all
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class RetentionPolicy(Base):
+    """Data retention policy configuration."""
+    __tablename__ = "retention_policy"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(64), unique=True, nullable=False)
+    retention_days = Column(Integer, nullable=False, default=90)
+    enabled = Column(Boolean, default=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_by = Column(String(128), nullable=True)
+
+
+RETENTION_DEFAULTS: dict[str, int] = {
+    "audit_log": 90,
+}
+
+
+class AuditLog(Base):
+    """Audit trail for all API access."""
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    user_id = Column(String(128), index=True)
+    method = Column(String(16))
+    path = Column(String(256))
+    status_code = Column(Integer)
+    latency_ms = Column(Float, default=0.0)
+    project_key = Column(String(64), nullable=True)
+    ip_address = Column(String(64), nullable=True)
+
+
 class AiUsage(Base):
     """Token usage tracking for AI agent calls."""
     __tablename__ = "ai_usage"

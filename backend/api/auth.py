@@ -9,12 +9,14 @@ Provides:
 """
 from __future__ import annotations
 
+import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Header, status
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -123,8 +125,31 @@ def decode_access_token(token: str) -> UserSession | None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Login rate limiter
+# ---------------------------------------------------------------------------
+
+_login_rate: dict[str, list[float]] = defaultdict(list)
+_LOGIN_RATE_MAX = 5
+_LOGIN_RATE_WINDOW = 60
+
+
+async def _check_login_rate(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    cutoff = now - _LOGIN_RATE_WINDOW
+    _login_rate[ip] = [t for t in _login_rate[ip] if t > cutoff]
+    if len(_login_rate[ip]) >= _LOGIN_RATE_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again in 60 seconds.",
+            headers={"Retry-After": "60"},
+        )
+    _login_rate[ip].append(now)
+
+
 @router.post("/login", response_model=TokenResponse)
-async def login(login_req: LoginRequest) -> TokenResponse:
+async def login(login_req: LoginRequest, _rate=Depends(_check_login_rate)) -> TokenResponse:
     """
     Authenticate with an API key and receive a JWT token.
     In MVP: the admin API key is generated from APP_SECRET_KEY.

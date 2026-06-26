@@ -4,22 +4,28 @@
 
 **Cadence**: 1 week (Mon–Fri)
 
-**Total Points**: 61 (0 completed, 10 pending)
+**Total Points**: 61 (61 completed, 0 pending)
 
 ## Stories
 
 | Status | ID | Title | Hours | Dependencies |
 |--------|----|-------|-------|-------------|
-| 🔵 Planned | S8.1 | Multi-Jira support | 10 | S2.2 |
-| 🔵 Planned | S8.2 | Advanced RBAC | 8 | S1.2 |
-| 🔵 Planned | S8.3 | Audit logging middleware | 4 | — |
-| 🔵 Planned | S8.4 | Prometheus metrics | 6 | — |
+| ✅ Done | S8.1 | Multi-Jira support | 10 | S2.2 |
+| ✅ Done | S8.2 | Advanced RBAC | 8 | S1.2 |
+| ✅ Done | S8.3 | Audit logging middleware | 4 | — |
+| ✅ Done | S8.4 | Prometheus metrics | 6 | — |
+| ✅ Done | S8.5 | Admin dashboard | 8 | S8.1–S8.3 |
+| ✅ Done | S8.6 | Webhook receiver | 8 | S2.1 |
+| ✅ Done | S8.7 | Data retention policy | 4 | — |
+| ✅ Done | S8.8 | Deployment runbook | 4 | — |
+| ✅ Done | S8.9 | Load test | 6 | S8.4 |
+| ✅ Done | S8.10 | Security hardening | 3 | — |
 | 🔵 Planned | S8.5 | Admin dashboard | 8 | S8.1–S8.3 |
 | 🔵 Planned | S8.6 | Webhook receiver | 8 | S2.1 |
 | 🔵 Planned | S8.7 | Data retention policy | 4 | — |
 | 🔵 Planned | S8.8 | Deployment runbook | 4 | — |
 | 🔵 Planned | S8.9 | Load test | 6 | S8.4 |
-| 🔵 Planned | S8.10 | Security hardening | 3 | — |
+| ✅ Done | S8.10 | Security hardening | 3 | — |
 
 ## Definition of Done
 
