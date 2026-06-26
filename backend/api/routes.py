@@ -735,6 +735,30 @@ async def sync_status(user: AuthDep, limit: int = Query(10)):
 # Export
 # ---------------------------------------------------------------------------
 
+@router.get("/export/xlsx")
+async def export_issues_xlsx(
+    user: AuthDep,
+    project_key: str = Query(...),
+):
+    from api.export import build_xlsx
+
+    async with get_db() as db:
+        kpis = (await db.execute(
+            select(KPIResult).where(KPIResult.project_key == project_key)
+        )).scalars().all()
+
+        issues = (await db.execute(
+            select(FactIssue).where(FactIssue.project_key == project_key)
+            .order_by(FactIssue.jira_key)
+        )).scalars().all()
+
+    buf = await build_xlsx(project_key, kpis, issues)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={project_key}_export.xlsx"},
+    )
+
 @router.get("/export/csv")
 async def export_issues_csv(
     user: AuthDep,
