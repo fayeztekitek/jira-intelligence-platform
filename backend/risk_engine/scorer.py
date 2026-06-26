@@ -61,10 +61,11 @@ class RiskScoreResult:
     compliance: DimensionScore
     operational: DimensionScore
     composite_score: float
-    risk_level: str         # low | medium | high | critical
+    risk_level: str
     risk_drivers: list[str]
     recommended_actions: list[str]
     weights: dict[str, float]
+    period_label: str = "1m"
 
     def to_dict(self) -> dict:
         return {
@@ -150,6 +151,7 @@ class RiskScorer:
         return RiskScoreResult(
             project_key=self.kpis.project_key,
             calculated_at=self.kpis.calculated_at,
+            period_label=self.period,
             delivery=delivery,
             quality=quality,
             compliance=compliance,

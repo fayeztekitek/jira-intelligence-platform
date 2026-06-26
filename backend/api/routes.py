@@ -405,16 +405,23 @@ async def get_project_risk(
     user: AuthDep,
     project_key: str,
     as_of: str | None = Query(None),
+    period: str = Query("1m", description="Period: 1w|1m|3m"),
 ):
     calc_date = date.fromisoformat(as_of) if as_of else None
     async with get_db() as db:
-        q = select(RiskScore).where(RiskScore.project_key == project_key)
+        q = select(RiskScore).where(
+            RiskScore.project_key == project_key,
+            RiskScore.period_label == period,
+        )
         if calc_date:
             q = q.where(RiskScore.calculation_date == calc_date)
         else:
             subq = (
                 select(func.max(RiskScore.calculation_date))
-                .where(RiskScore.project_key == project_key)
+                .where(
+                    RiskScore.project_key == project_key,
+                    RiskScore.period_label == period,
+                )
                 .scalar_subquery()
             )
             q = q.where(RiskScore.calculation_date == subq)
@@ -426,6 +433,7 @@ async def get_project_risk(
 
     return {
         "project_key": project_key,
+        "period": period,
         "calculated_at": row.calculation_date.isoformat(),
         "composite_risk": row.composite_risk,
         "risk_level": row.risk_level.value if row.risk_level else "low",

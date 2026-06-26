@@ -341,12 +341,14 @@ class KPIResult(Base):
 class RiskScore(Base):
     """
     Risk score per project, calculated as Impact × Probability × Trend.
+    One row per (project, date, period_label).
     """
     __tablename__ = "risk_score"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_key = Column(String(64), ForeignKey("dim_project.id"), index=True)
     calculation_date = Column(Date, index=True)
+    period_label = Column(String(16), default="1m")  # 1w | 1m | 3m
     delivery_risk = Column(Float, default=0.0)
     quality_risk = Column(Float, default=0.0)
     compliance_risk = Column(Float, default=0.0)
@@ -357,6 +359,6 @@ class RiskScore(Base):
     recommended_actions = Column(Text)  # JSON: list of recommendations
 
     __table_args__ = (
-        UniqueConstraint("project_key", "calculation_date",
-                         name="uq_risk_project_date"),
+        UniqueConstraint("project_key", "calculation_date", "period_label",
+                         name="uq_risk_project_date_period"),
     )

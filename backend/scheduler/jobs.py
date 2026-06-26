@@ -91,9 +91,13 @@ async def job_calculate_kpis() -> None:
             calc = KPICalculator(project.id, issues, as_of=today)
             kpis = calc.calculate_all()
 
-            # Calculate risk
-            scorer = RiskScorer(kpis)
-            risk = scorer.score()
+            # Calculate risk for multiple periods
+            risk_periods = ["1w", "1m", "3m"]
+            risks = {}
+            for rp in risk_periods:
+                scorer = RiskScorer(kpis, reference_period=rp)
+                risks[rp] = scorer.score()
+            risk = risks["1m"]  # default for legacy consumers
 
             # Compute sprint KPIs
             sprint_velocity = None
@@ -120,7 +124,8 @@ async def job_calculate_kpis() -> None:
 
             # Persist
             await writer.write_kpis(kpis)
-            await writer.write_risk_score(risk)
+            for rp in risk_periods:
+                await writer.write_risk_score(risks[rp])
 
             for period_type in ["daily", "weekly", "monthly"]:
                 await writer.write_snapshot(
@@ -181,10 +186,15 @@ async def job_backfill_snapshots(days: int = 90) -> int:
             try:
                 calc = KPICalculator(project.id, issues, as_of=as_of)
                 kpis = calc.calculate_all()
-                scorer = RiskScorer(kpis)
-                risk = scorer.score()
+                risk_periods = ["1w", "1m", "3m"]
+                risks = {}
+                for rp in risk_periods:
+                    scorer = RiskScorer(kpis, reference_period=rp)
+                    risks[rp] = scorer.score()
+                risk = risks["1m"]
                 await writer.write_kpis(kpis)
-                await writer.write_risk_score(risk)
+                for rp in risk_periods:
+                    await writer.write_risk_score(risks[rp])
                 for pt in ["daily", "weekly", "monthly"]:
                     await writer.write_snapshot(project.id, as_of, pt, kpis, risk)
                     total_written += 1

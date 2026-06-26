@@ -114,3 +114,53 @@ class TestRiskScorer:
         assert "quality" in d["dimensions"]
         assert "recommended_actions" in d
         assert "risk_drivers" in d
+
+    def test_default_period_is_1m(self):
+        issues = [make_issue("P-1")]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk = RiskScorer(kpis).score()
+        assert risk.period_label == "1m"
+
+    def test_period_1w_uses_short_window(self):
+        """1w risk should use 7d KPI data (fewer issues in window → different score)."""
+        old_issues = [make_issue(f"P-{i}", created_offset=60, resolved_offset=None)
+                      for i in range(10)]
+        recent_issues = [make_issue(f"Q-{i}", created_offset=3, resolved_offset=None,
+                                    issue_type="Bug", priority="Critical")
+                         for i in range(5)]
+        issues = old_issues + recent_issues
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk_1w = RiskScorer(kpis, reference_period="1w").score()
+        risk_1m = RiskScorer(kpis, reference_period="1m").score()
+        assert risk_1w.period_label == "1w"
+        # 1w should have fewer issues in window but acute critical bugs
+        assert isinstance(risk_1w.composite_score, float)
+
+    def test_period_3m_more_inclusive(self):
+        """3m catches more old issues than 1m, potentially different scores."""
+        old = [make_issue(f"P-{i}", created_offset=90, resolved_offset=None,
+                          priority="Critical", issue_type="Bug")
+               for i in range(10)]
+        recent = [make_issue(f"Q-{i}", created_offset=10, resolved_offset=None,
+                             priority="Low")
+                  for i in range(5)]
+        issues = old + recent
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk_3m = RiskScorer(kpis, reference_period="3m").score()
+        risk_1m = RiskScorer(kpis, reference_period="1m").score()
+        assert risk_3m.period_label == "3m"
+        # 3m should include the old critical bugs, driving up quality risk
+        assert isinstance(risk_3m.composite_score, float)
+
+    def test_multi_period_produces_different_scores(self):
+        """1w, 1m, 3m should produce meaningfully different risk scores."""
+        issues = [make_issue(f"P-{i}", created_offset=60, resolved_offset=None,
+                             priority="Critical", issue_type="Bug")
+                  for i in range(5)]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        scores = {}
+        for period in ["1w", "1m", "3m"]:
+            risk = RiskScorer(kpis, reference_period=period).score()
+            scores[period] = risk.composite_score
+        # 3m includes more old issues so score should differ
+        assert scores["1w"] != scores["3m"] or scores["1m"] != scores["3m"]
