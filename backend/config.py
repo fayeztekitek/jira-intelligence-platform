@@ -2,6 +2,7 @@
 config.py — Central configuration using pydantic-settings.
 All secrets come from environment variables. Never hardcoded.
 """
+import json
 from functools import lru_cache
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,6 +52,25 @@ class Settings(BaseSettings):
 
     # Cycle / lead time computation
     jira_in_progress_statuses: str = "In Progress"
+
+    # Risk scoring weights (JSON: {"delivery":0.30, "quality":0.35, "compliance":0.20, "operational":0.15})
+    risk_weights_json: str = '{"delivery": 0.30, "quality": 0.35, "compliance": 0.20, "operational": 0.15}'
+
+    @property
+    def risk_weights(self) -> dict[str, float]:
+        """Parse risk_weights_json into a dict, validated at access time."""
+        try:
+            w = json.loads(self.risk_weights_json)
+            if not isinstance(w, dict):
+                raise ValueError("risk_weights must be a JSON object")
+            total = sum(w.values())
+            if abs(total - 1.0) > 0.01:
+                raise ValueError(f"Risk weights must sum to ~1.0, got {total:.2f}")
+            return w
+        except (json.JSONDecodeError, ValueError) as e:
+            import warnings
+            warnings.warn(f"Invalid RISK_WEIGHTS: {e}. Using defaults.")
+            return {"delivery": 0.30, "quality": 0.35, "compliance": 0.20, "operational": 0.15}
 
     # Features
     enable_nlp_analysis: bool = False

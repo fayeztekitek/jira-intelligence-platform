@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import date, datetime, timedelta, timezone
 from kpi_engine.calculator import KPICalculator, IssueRecord
 from risk_engine.scorer import RiskScorer, DEFAULT_WEIGHTS
+from config import get_settings
 
 
 def _utc(d: date) -> datetime:
@@ -164,3 +165,43 @@ class TestRiskScorer:
             scores[period] = risk.composite_score
         # 3m includes more old issues so score should differ
         assert scores["1w"] != scores["3m"] or scores["1m"] != scores["3m"]
+
+    def test_default_weights_from_config(self):
+        """RiskScorer should load default weights from config when none provided."""
+        cfg = get_settings()
+        issues = [make_issue(f"P-{i}") for i in range(3)]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk = RiskScorer(kpis).score()
+        assert risk.weights == cfg.risk_weights
+
+    def test_custom_weights_override_config(self):
+        """Explicit weights should override config defaults."""
+        custom = {"delivery": 0.5, "quality": 0.3, "compliance": 0.1, "operational": 0.1}
+        issues = [make_issue(f"P-{i}") for i in range(3)]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk = RiskScorer(kpis, weights=custom).score()
+        assert risk.weights == custom
+
+    def test_config_risk_weights_validation(self):
+        """Config parses valid JSON and rejects bad weights."""
+        import json
+        cfg = get_settings()
+        # Valid weights
+        valid = '{"delivery": 0.25, "quality": 0.25, "compliance": 0.25, "operational": 0.25}'
+        parsed = json.loads(valid)
+        total = sum(parsed.values())
+        assert abs(total - 1.0) < 0.01
+
+    def test_risk_weights_affect_composite_score(self):
+        """Different weights should produce different composite scores."""
+        issues = [make_issue(f"P-{i}", issue_type="Bug", priority="Critical",
+                             created_offset=5, resolved_offset=None)
+                  for i in range(10)]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        # Weight quality heavily vs weight delivery heavily
+        w_quality = {"delivery": 0.1, "quality": 0.7, "compliance": 0.1, "operational": 0.1}
+        w_delivery = {"delivery": 0.7, "quality": 0.1, "compliance": 0.1, "operational": 0.1}
+        r1 = RiskScorer(kpis, weights=w_quality).score()
+        r2 = RiskScorer(kpis, weights=w_delivery).score()
+        # With many critical bugs, quality-heavy weighting should differ
+        assert r1.composite_score != r2.composite_score

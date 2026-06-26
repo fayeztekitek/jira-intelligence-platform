@@ -12,7 +12,7 @@
 |--------|----|-------|-------|-------------|
 | ✅ Done | S5.1 | Expand risk KPIs — blocked critical, aging critical, SLA-close indicators | 5 | — |
 | ✅ Done | S5.2 | Multi-period risk scoring — compute for 1w, 1m, 3m (not just 1m) | 4 | S3.1 |
-| 🔵 Planned | S5.3 | Configurable risk weights from settings env var | 2 | — |
+| ✅ Done | S5.3 | Configurable risk weights from settings env var | 2 | — |
 | 🔵 Planned | S5.4 | Risk trend API — history of composite risk + dimensions | 3 | S5.2 |
 | 🔵 Planned | S5.5 | Streaming CSV export with configurable row limit | 4 | — |
 | 🔵 Planned | S5.6 | Excel export — `.xlsx` with separate sheets per KPI category | 6 | — |

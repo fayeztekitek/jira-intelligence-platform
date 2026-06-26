@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 
+from config import get_settings
 from kpi_engine.calculator import ProjectKPIs, KPIValue
 
 logger = structlog.get_logger(__name__)
@@ -114,7 +115,7 @@ class RiskScorer:
         reference_period: str = "1m",
     ):
         self.kpis = kpis
-        self.weights = weights or DEFAULT_WEIGHTS
+        self.weights = weights or get_settings().risk_weights
         self.period = reference_period
         self._validate_weights()
 
