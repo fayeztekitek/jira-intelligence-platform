@@ -15,7 +15,11 @@ from typing import Any
 
 from config import get_settings
 from ai_agent.tools import list_tools, call_tool
-from ai_agent.prompts import system_prompt, mode_prompt, fallback_prompt
+from ai_agent.prompts import (
+    system_prompt, mode_prompt, fallback_prompt, ambiguity_prompt,
+    STATIC_SUGGESTIONS, SUGGESTIONS_TEMPLATE, _render,
+    detect_language, translate_labels, static_suggestions,
+)
 from ai_agent.guardrails import (
     strip_pii, is_off_topic, detect_ambiguity, check_permission, enforce_source_citation,
 )
@@ -142,28 +146,40 @@ class AgentOrchestrator:
     # Response generation
     # ------------------------------------------------------------------
 
-    def _generate_response(self, question: str, intent: str,
-                           tool_name: str | None, result: Any) -> str:
+    async def _generate_response(self, question: str, intent: str,
+                                 tool_name: str | None, result: Any, lang: str = "en") -> str:
+        error_msg = {"en": "I encountered an error", "fr": "J'ai rencontré une erreur"}
         if isinstance(result, dict) and "error" in result:
-            return f"I encountered an error: {result['error']}"
+            return f"{error_msg.get(lang, error_msg['en'])}: {result['error']}"
+
+        # Detect report generation requests
+        q = question.lower()
+        is_report = any(w in q for w in ["executive report", "generate report", "full report",
+                                          "structured report", "briefing", "weekly report"])
+        if is_report and tool_name == "get_exec_summary":
+            proj = result.get("project_key", "CORE")
+            return await self.generate_executive_report(proj, lang=lang)
 
         # Use LLM if configured, else fallback to built-in formatters
         if settings.llm_api_key:
-            return self._llm_generate(question, intent, tool_name, result)
+            return self._llm_generate(question, intent, tool_name, result, lang=lang)
 
-        return self._format_response(tool_name, result)
+        response = self._format_response(tool_name, result, lang=lang)
+        return translate_labels(response, lang)
 
     def _llm_generate(self, question: str, intent: str,
-                      tool_name: str | None, result: Any) -> str:
+                      tool_name: str | None, result: Any, lang: str = "en") -> str:
         mode = "executive" if intent in ("executive", "comparison") else \
                "technical" if intent in ("technical", "historical") else \
                "operational"
         source_label = f"{tool_name} for {result.get('project_key', '?')}" if tool_name else "data"
+        if lang == "fr":
+            source_label = f"{tool_name} pour {result.get('project_key', '?')}" if tool_name else "données"
         result_str = json.dumps(result, indent=2, default=str) if result else "No data returned."
 
         messages = [
-            {"role": "system", "content": system_prompt()},
-            {"role": "user", "content": mode_prompt(mode, question, result_str, source_label=source_label)},
+            {"role": "system", "content": system_prompt(lang=lang)},
+            {"role": "user", "content": mode_prompt(mode, question, result_str, source_label=source_label, lang=lang)},
         ]
 
         try:
@@ -178,12 +194,14 @@ class AgentOrchestrator:
             return resp.choices[0].message.content or ""
         except Exception as e:
             logger.warning("llm_failed", error=str(e))
-            return self._format_response(tool_name, result)
+            return self._format_response(tool_name, result, lang=lang)
 
     @staticmethod
-    def _format_response(tool_name: str | None, result: Any) -> str:
+    def _format_response(tool_name: str | None, result: Any, lang: str = "en") -> str:
+        no_data_msg = {"en": "I don't have enough data to answer that.",
+                       "fr": "Je n'ai pas assez de données pour répondre à cela."}
         if not result:
-            return "I don't have enough data to answer that."
+            return no_data_msg.get(lang, no_data_msg["en"])
 
         if tool_name == "get_exec_summary":
             projs = result.get("projects", [])
@@ -223,13 +241,50 @@ class AgentOrchestrator:
         if tool_name == "compare_projects":
             kpis = result.get("kpis", {})
             risks = result.get("risks", {})
-            lines = ["**Project Comparison**"]
-            for pk in result.get("projects", []):
-                r = risks.get(pk, {})
-                lines.append(f"\n**{pk}**: risk={r.get('risk_level','N/A')}, score={r.get('composite_risk','N/A')}")
-                pk_kpis = kpis.get(pk, {})
-                for name, val in list(pk_kpis.items())[:5]:
-                    lines.append(f"  - {name}: {val}")
+            projects = result.get("projects", [])
+            lines = ["**Project Comparison**\n"]
+
+            if risks:
+                lines.append("| Dimension | " + " | ".join(f"{p}" for p in projects) + " |")
+                lines.append("|" + "|".join("---" for _ in range(len(projects) + 1)) + "|")
+                dims = ["risk_level", "composite_risk", "delivery_risk", "quality_risk"]
+                dim_labels = ["Risk Level", "Composite Risk", "Delivery Risk", "Quality Risk"]
+                for dl, dim in zip(dim_labels, dims):
+                    row = f"| **{dl}** "
+                    for pk in projects:
+                        r = risks.get(pk, {})
+                        val = r.get(dim, "N/A")
+                        if isinstance(val, (int, float)):
+                            val = f"{val:.2f}"
+                        arrow = ""
+                        if dim != "risk_level" and isinstance(val, str):
+                            try:
+                                v = float(val)
+                                if dim == "composite_risk":
+                                    arrow = " ↓" if v > 0.6 else " ↑" if v <= 0.3 else " →"
+                                else:
+                                    arrow = " ↓" if v > 0.6 else " ↑" if v <= 0.3 else " →"
+                            except ValueError:
+                                pass
+                        row += f" | {val}{arrow}"
+                    lines.append(row + " |")
+                lines.append("")
+
+            all_kpi_names = sorted({k for pk in projects for k in kpis.get(pk, {})})
+            if all_kpi_names:
+                lines.append(f"| KPI | {' | '.join(f'{p}' for p in projects)} |")
+                lines.append("|" + "|".join("---" for _ in range(len(projects) + 1)) + "|")
+                for name in all_kpi_names[:15]:
+                    row = f"| **{name}** "
+                    for pk in projects:
+                        pk_kpis = kpis.get(pk, {})
+                        val = pk_kpis.get(name)
+                        if val is None:
+                            row += " | —"
+                        else:
+                            row += f" | {val:.2f}" if isinstance(val, float) else f" | {val}"
+                    lines.append(row + " |")
+
             return "\n".join(lines)
 
         if tool_name == "get_sprint_analysis":
@@ -265,7 +320,16 @@ class AgentOrchestrator:
             return "\n".join(lines)
 
         source_label = f"{tool_name} for {result.get('project_key', '?')}" if tool_name else "data"
-        return (f"[Source: {source_label}]\n" + json.dumps(result, indent=2, default=str))
+        response = (f"[Source: {source_label}]\n" + json.dumps(result, indent=2, default=str))
+        return translate_labels(response, lang)
+
+    # ------------------------------------------------------------------
+    # Language detection
+    # ------------------------------------------------------------------
+
+    def _detect_language(self, question: str) -> str:
+        lang = detect_language(question)
+        return lang
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -274,10 +338,16 @@ class AgentOrchestrator:
     async def ask(self, question: str, allowed_projects: list[str] | None = None) -> dict:
         start = time.monotonic()
 
+        lang = self._detect_language(question)
+        off_topic_msg = {
+            "en": "I'm a Jira analytics assistant and can only answer questions about project data, KPIs, risks, and sprints.",
+            "fr": "Je suis un assistant d'analyse Jira et je peux uniquement répondre aux questions sur les données de projet, les KPI, les risques et les sprints.",
+        }
+
         # Guard 1: content safety
         if is_off_topic(question):
             return {
-                "response": "I'm a Jira analytics assistant and can only answer questions about project data, KPIs, risks, and sprints.",
+                "response": off_topic_msg.get(lang, off_topic_msg["en"]),
                 "intent": "rejected",
                 "tool_used": None,
                 "latency_ms": 0,
@@ -289,7 +359,7 @@ class AgentOrchestrator:
         # Guard 2: ambiguity detection
         ambiguous = detect_ambiguity(question, intent)
         if ambiguous:
-            response = ambiguity_prompt(ambiguous)
+            response = ambiguity_prompt(ambiguous, lang=lang)
             latency = round((time.monotonic() - start) * 1000, 1)
             return {
                 "response": response,
@@ -304,25 +374,31 @@ class AgentOrchestrator:
 
         # Guard 3: permission check
         proj = params.get("project_key") or params.get("project_keys", "").split(",")[0]
+        no_access_msg = {
+            "en": f"I'm sorry, you don't have access to project **{proj}**.",
+            "fr": f"Désolé, vous n'avez pas accès au projet **{proj}**.",
+        }
         if proj and allowed_projects is not None and not check_permission(proj, allowed_projects):
             return {
-                "response": f"I'm sorry, you don't have access to project **{proj}**.",
+                "response": no_access_msg.get(lang, no_access_msg["en"]),
                 "intent": intent,
                 "tool_used": None,
                 "latency_ms": round((time.monotonic() - start) * 1000, 1),
                 "context_remaining": settings.agent_context_size - len(self.history),
             }
 
-        logger.info("agent_dispatch", intent=intent, tool=tool_name, params=params)
+        logger.info("agent_dispatch", intent=intent, tool=tool_name, params=params, lang=lang)
 
         result = None
         if tool_name:
             result = await call_tool(tool_name, **params)
 
-        response = self._generate_response(question, intent, tool_name, result)
+        response = await self._generate_response(question, intent, tool_name, result, lang=lang)
 
         # Guard 4: source citation enforcement
         default_source = f"{tool_name} for {proj}" if tool_name and proj else "data"
+        if lang == "fr":
+            default_source = f"{tool_name} pour {proj}" if tool_name and proj else "données"
         response = enforce_source_citation(response, default_source)
 
         # Guard 5: PII redaction
@@ -339,7 +415,7 @@ class AgentOrchestrator:
             self.history.pop(0)
 
         logger.info("agent_response", intent=intent, tool=tool_name,
-                     latency_ms=latency, response_len=len(response))
+                     latency_ms=latency, response_len=len(response), lang=lang)
 
         return {
             "response": response,
@@ -348,6 +424,137 @@ class AgentOrchestrator:
             "latency_ms": latency,
             "context_remaining": settings.agent_context_size - len(self.history),
         }
+
+    # ------------------------------------------------------------------
+    # Suggested questions
+    # ------------------------------------------------------------------
+
+    def suggest_questions(self, context: dict | None = None) -> list[str]:
+        history = self.get_history()
+        recent_intent = history[-1].get("intent") if history else None
+        recent_tool = history[-1].get("tool") if history else None
+        recent_tool_result = None
+        if self.history and self.history[-1].tool_result:
+            recent_tool_result = str(self.history[-1].tool_result)
+
+        lang = "en"
+        if history:
+            lang = detect_language(history[-1].get("question", ""))
+
+        # Try LLM-based suggestions if configured
+        if settings.llm_api_key:
+            try:
+                return self._llm_suggest(history, recent_tool_result, lang=lang)
+            except Exception:
+                pass
+
+        # Fallback to static context-aware suggestions
+        return self._static_suggestions(recent_intent, recent_tool, context, lang=lang)
+
+    def _llm_suggest(self, history: list[dict], recent_tool_result: str | None, lang: str = "en") -> list[str]:
+        from openai import OpenAI
+        from ai_agent.prompts import suggestions_prompt
+        prompt = suggestions_prompt(history, recent_tool_result, lang=lang)
+        client = OpenAI(api_key=settings.llm_api_key)
+        resp = client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": "You are a Jira analytics assistant suggesting follow-up questions."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=300,
+            temperature=0.7,
+        )
+        content = resp.choices[0].message.content or "[]"
+        import json
+        suggestions = json.loads(content)
+        return suggestions[:6] if isinstance(suggestions, list) else static_suggestions("default", lang=lang)
+
+    @staticmethod
+    def _static_suggestions(recent_intent: str | None, recent_tool: str | None,
+                            context: dict | None, lang: str = "en") -> list[str]:
+        ctx = context or {}
+        context_key = "default"
+
+        if recent_intent == "comparison":
+            context_key = "comparison"
+        elif recent_intent == "executive":
+            context_key = "executive"
+        elif recent_intent == "operational" and recent_tool == "get_risk_scores":
+            context_key = "risk"
+        elif ctx.get("project"):
+            context_key = "project"
+
+        return static_suggestions(context_key, project=ctx.get("project"), lang=lang)
+
+    # ------------------------------------------------------------------
+    # Executive report generation
+    # ------------------------------------------------------------------
+
+    async def generate_executive_report(self, project_key: str, lang: str = "en") -> str:
+        """Generate a 3-section executive report: summary, risks, actions."""
+        from ai_agent.tools import call_tool
+
+        summary_data = await call_tool("get_exec_summary", project_key=project_key)
+        risk_data = await call_tool("get_risk_scores", project_key=project_key)
+        rec_data = await call_tool("get_recommendations", project_key=project_key)
+
+        section_titles = {
+            "en": ["Executive Summary", "Risk Assessment", "Recommended Actions"],
+            "fr": ["Résumé Exécutif", "Évaluation des Risques", "Actions Recommandées"],
+        }
+        titles = section_titles.get(lang, section_titles["en"])
+
+        # Section 1: Summary
+        metrics = summary_data.get("metrics", {})
+        lines = [f"# {titles[0]} — **{project_key}**\n"]
+        lines.append(f"*Generated: {summary_data.get('generated_at', 'N/A')}*\n")
+
+        total = summary_data.get("total_issues", 0)
+        risk_level = summary_data.get("risk_level", "unknown")
+        lines.append(f"**Portfolio Overview**: {project_key} has **{total}** tracked issues. "
+                     f"Overall risk level is **{risk_level}**.\n")
+
+        if metrics:
+            lines.append("**Key Metrics**:")
+            for name, val in metrics.items():
+                if val is not None:
+                    lines.append(f"- **{name.replace('_', ' ').title()}**: {val:.2f}" if isinstance(val, float) else f"- **{name.replace('_', ' ').title()}**: {val}")
+            lines.append("")
+
+        # Section 2: Risks
+        lines.extend([f"## {titles[1]}\n"])
+        if "error" not in risk_data:
+            lines.append(f"- **Composite Risk**: {risk_data.get('composite_risk', 'N/A')} "
+                         f"({risk_data.get('risk_level', 'N/A')})")
+            for dim in ["delivery_risk", "quality_risk", "compliance_risk", "operational_risk"]:
+                val = risk_data.get(dim)
+                if val is not None:
+                    label = dim.replace("_", " ").title()
+                    lines.append(f"- **{label}**: {val:.2f}" if isinstance(val, float) else f"- **{label}**: {val}")
+            drivers = risk_data.get("risk_drivers", [])
+            if drivers:
+                lines.append(f"\n**Top Drivers**: {', '.join(drivers[:5])}")
+            lines.append("")
+        else:
+            lines.append("No risk data available.\n")
+
+        # Section 3: Actions
+        lines.extend([f"## {titles[2]}\n"])
+        recs = rec_data.get("recommendations", [])
+        if recs:
+            for i, rec in enumerate(recs[:5], 1):
+                priority = rec.get("priority", "medium")
+                p_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "🟡")
+                lines.append(f"{i}. {p_icon} **{rec.get('title', 'Action')}**")
+                lines.append(f"   - {rec.get('description', '')}")
+                area = rec.get("impact_area", "").replace("_", " ").title()
+                lines.append(f"   - Impact: {area} | Priority: **{priority.upper()}**")
+            lines.append("")
+        else:
+            lines.append("No recommendations available.\n")
+
+        return translate_labels("\n".join(lines), lang)
 
     def get_history(self) -> list[dict]:
         return [

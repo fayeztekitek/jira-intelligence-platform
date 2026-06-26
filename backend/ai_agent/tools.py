@@ -1,96 +1,305 @@
 """
 ai_agent/tools.py — Tool registry for the AI agent.
 
-8 tools that the agent can call to answer user questions about Jira data.
-Each tool is a decorated async function with a Pydantic parameter schema.
+Each tool is registered with the @tool decorator and provides:
+- A name and description for intent matching
+- A Pydantic params_model for parameter validation
+- An async handler function
+
+Tools connect to the database directly (not via API routes).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from datetime import date, timedelta, datetime
+import logging
+from datetime import date
 from functools import wraps
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, and_, Integer
+from sqlalchemy import select, func, and_
 
 from storage.database import get_db
 from storage.models import (
-    DimProject, FactIssue, KPIResult, RiskScore, ExtractionRun, FactSnapshot,
+    KPIResult, RiskScore, FactIssue, DimProject,
+    ExtractionRun, FactSnapshot, DimVersion,
 )
-from kpi_engine.sprint import SprintAnalyzer
-from kpi_engine.release import ReleaseAnalyzer
+from config import get_settings
 
-TOOL_TIMEOUT = 30
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
-_tool_registry: dict[str, dict[str, Any]] = {}
+# ---------------------------------------------------------------------------
+# Tool metadata store
+# ---------------------------------------------------------------------------
+
+_TOOL_REGISTRY: dict[str, dict] = {}
 
 
 def tool(name: str, description: str, params_model: type[BaseModel]):
-    """Decorator that registers an async function as an agent tool."""
-    def decorator(func: Callable) -> Callable:
-        schema = params_model.model_json_schema()
-        _tool_registry[name] = {
+    """Decorator that registers a callable tool in the global registry."""
+    def decorator(func: Callable):
+        @wraps(func)
+        async def wrapper(**kwargs):
+            validated = params_model(**kwargs)
+            try:
+                return await func(**validated.model_dump())
+            except Exception as e:
+                logger.error("tool_error", tool=name, error=str(e))
+                return {"error": str(e)}
+
+        _TOOL_REGISTRY[name] = {
             "name": name,
             "description": description,
-            "parameters": schema,
-            "fn": func,
+            "params_model": params_model,
+            "handler": wrapper,
         }
-
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            try:
-                return await asyncio.wait_for(func(*args, **kwargs), timeout=TOOL_TIMEOUT)
-            except asyncio.TimeoutError:
-                return {"error": f"Tool '{name}' timed out after {TOOL_TIMEOUT}s"}
-            except Exception as e:
-                return {"error": f"Tool '{name}' failed: {str(e)}"}
         return wrapper
+
     return decorator
 
 
 def list_tools() -> list[dict]:
-    """Return metadata for all registered tools (without the handler)."""
     return [
-        {"name": t["name"], "description": t["description"], "parameters": t["parameters"]}
-        for t in _tool_registry.values()
+        {"name": v["name"], "description": v["description"]}
+        for v in _TOOL_REGISTRY.values()
     ]
 
 
 async def call_tool(name: str, **kwargs) -> Any:
-    """Execute a tool by name with validated kwargs."""
-    entry = _tool_registry.get(name)
-    if not entry:
-        return {"error": f"Unknown tool '{name}'"}
-    return await entry["fn"](**kwargs)
+    meta = _TOOL_REGISTRY.get(name)
+    if not meta:
+        return {"error": f"Unknown tool: {name}"}
+    return await meta["handler"](**kwargs)
 
 
 # ---------------------------------------------------------------------------
-# Parameter models
+# Shared parameter models
 # ---------------------------------------------------------------------------
 
 class ProjectKeyParam(BaseModel):
-    project_key: str = Field(..., description="Jira project key (e.g. CORE)")
+    project_key: str = Field(..., description="Jira project key (e.g., CORE, MOBILE)")
 
-class ProjectKeyOptionalParam(BaseModel):
-    project_key: str = Field("CORE", description="Jira project key (default: CORE)")
+
+class ProjectKeysParam(BaseModel):
+    project_keys: str = Field(..., description="Comma-separated project keys")
+
 
 class SearchIssuesParam(BaseModel):
     project_key: str = Field(..., description="Jira project key")
-    issue_type: str | None = Field(None, description="Filter by issue type: Bug, Story, Task, Epic")
-    status: str | None = Field(None, description="Filter by status: To Do, In Progress, Done")
-    priority: str | None = Field(None, description="Filter by priority: Critical, High, Medium, Low")
-    limit: int = Field(20, description="Max results", ge=1, le=100)
+    issue_type: str | None = Field(None, description="Type filter: bug, story, task, epic")
+    status: str | None = Field(None, description="Status filter: To Do, In Progress, Done, etc.")
+    limit: int = Field(20, description="Max results", ge=1, le=200)
 
-class CompareProjectsParam(BaseModel):
-    project_keys: str = Field(..., description="Comma-separated project keys (e.g. CORE,MOBILE)")
 
 class TrendParam(BaseModel):
     project_key: str = Field(..., description="Jira project key")
-    kpi_name: str = Field(..., description="KPI name (e.g. issues_created, resolution_rate)")
-    days: int = Field(90, description="Lookback days", ge=1, le=365)
+    days: int = Field(90, description="Lookback period in days", ge=1, le=365)
+    kpi_name: str | None = Field(None, description="Optional KPI name filter")
+
+
+# ---------------------------------------------------------------------------
+# Recommendation engine
+# ---------------------------------------------------------------------------
+
+RECOMMENDATION_RULES: list[dict] = [
+    {"name": "blocked_issues", "label": "Blocked Issues Needing Triage",
+     "description": "Multiple issues are blocked and need attention",
+     "impact_area": "delivery_risk", "priority": "high",
+     "kpi_check": "blocked_count", "threshold": 5, "direction": "above"},
+    {"name": "predictability", "label": "Sprint Planning Accuracy",
+     "description": "Sprint predictability is below target",
+     "impact_area": "process_optimization", "priority": "medium",
+     "kpi_check": "predictability", "threshold": 0.7, "direction": "below"},
+    {"name": "bug_rate", "label": "High Bug Injection Rate",
+     "description": "Bug rate exceeds healthy threshold",
+     "impact_area": "quality_improvement", "priority": "high",
+     "kpi_check": "bug_rate", "threshold": 0.3, "direction": "above"},
+    {"name": "overdue_ratio", "label": "Overdue Issue Backlog",
+     "description": "A significant portion of issues are overdue",
+     "impact_area": "delivery_risk", "priority": "high",
+     "kpi_check": "overdue_ratio", "threshold": 0.25, "direction": "above"},
+    {"name": "aging_critical", "label": "Aging Critical Issues",
+     "description": "Critical issues have been unresolved for too long",
+     "impact_area": "delivery_risk", "priority": "high",
+     "kpi_check": "aging_critical", "threshold": 7, "direction": "above"},
+    {"name": "scope_change", "label": "Frequent Scope Changes",
+     "description": "Sprint scope changes are affecting delivery predictability",
+     "impact_area": "process_optimization", "priority": "medium",
+     "kpi_check": "scope_change_rate", "threshold": 0.3, "direction": "above"},
+    {"name": "velocity_drop", "label": "Velocity Decline",
+     "description": "Team velocity has dropped compared to previous period",
+     "impact_area": "capacity", "priority": "medium",
+     "kpi_check": "velocity_change", "threshold": -0.1, "direction": "below"},
+    {"name": "composite_risk", "label": "Elevated Composite Risk",
+     "description": "Overall risk score is above acceptable threshold",
+     "impact_area": "delivery_risk", "priority": "high",
+     "kpi_check": "composite_risk", "threshold": 0.6, "direction": "above"},
+]
+
+
+async def _scan_kpis(project_key: str) -> list[dict]:
+    """Scan KPI results for anomalies based on recommendation rules."""
+    recommendations = []
+    async with get_db() as db:
+        stmt = select(KPIResult).where(
+            KPIResult.project_key == project_key,
+            KPIResult.period_label == "1m",
+        ).order_by(KPIResult.calculation_date.desc()).limit(50)
+        kpis = (await db.execute(stmt)).scalars().all()
+
+    kpi_map = {k.kpi_name: k for k in kpis}
+
+    for rule in RECOMMENDATION_RULES:
+        kpi = kpi_map.get(rule["kpi_check"])
+        if not kpi or kpi.current_value is None:
+            continue
+        val = kpi.current_value
+        threshold = rule["threshold"]
+        triggered = (
+            (val > threshold if rule["direction"] == "above" else val < threshold)
+        )
+        if triggered:
+            recommendations.append({
+                "title": rule["label"],
+                "description": f"{rule['description']}: current {rule['kpi_check']}={val:.2f}, threshold={threshold}",
+                "priority": rule["priority"],
+                "impact_area": rule["impact_area"],
+                "metric": rule["kpi_check"],
+                "current_value": val,
+                "threshold": threshold,
+            })
+    return recommendations
+
+
+async def _scan_risk(project_key: str) -> list[dict]:
+    """Scan risk data for additional recommendations."""
+    recommendations = []
+    async with get_db() as db:
+        risk = (await db.execute(
+            select(RiskScore).where(
+                RiskScore.project_key == project_key,
+                RiskScore.period_label == "1m",
+            ).order_by(RiskScore.calculation_date.desc())
+        )).scalars().first()
+
+    if risk:
+        if risk.delivery_risk and risk.delivery_risk >= 0.7:
+            recommendations.append({
+                "title": "High Delivery Risk",
+                "description": f"Delivery risk score is {risk.delivery_risk:.2f}. Review blockers and overdue items.",
+                "priority": "high",
+                "impact_area": "delivery_risk",
+                "metric": "delivery_risk",
+                "current_value": risk.delivery_risk,
+                "threshold": 0.7,
+            })
+        if risk.quality_risk and risk.quality_risk >= 0.6:
+            recommendations.append({
+                "title": "Quality Risk Requires Attention",
+                "description": f"Quality risk score is {risk.quality_risk:.2f}. Consider code review and testing improvements.",
+                "priority": "medium",
+                "impact_area": "quality_improvement",
+                "metric": "quality_risk",
+                "current_value": risk.quality_risk,
+                "threshold": 0.6,
+            })
+        if risk.recommended_actions:
+            actions = json.loads(risk.recommended_actions) if isinstance(risk.recommended_actions, str) else risk.recommended_actions
+            for action in actions[:3]:
+                if isinstance(action, str):
+                    recommendations.append({
+                        "title": action[:80],
+                        "description": action,
+                        "priority": "medium",
+                        "impact_area": "delivery_risk",
+                    })
+    return recommendations
+
+
+async def _scan_issues(project_key: str) -> list[dict]:
+    """Scan recent issues for blockers and aging items."""
+    recommendations = []
+    async with get_db() as db:
+        blocked = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.status == "Blocked",
+            )
+        )).scalar() or 0
+        overdue = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.due_date < date.today(),
+                FactIssue.status.notin_(["Done", "Cancelled"]),
+            )
+        )).scalar() or 0
+        critical_open = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.priority.in_(["Highest", "Critical"]),
+                FactIssue.status.notin_(["Done", "Cancelled"]),
+            )
+        )).scalar() or 0
+
+    if blocked >= 5:
+        recommendations.append({
+            "title": f"{blocked} Blocked Issues Need Triage",
+            "description": f"There are {blocked} blocked issues in {project_key} requiring immediate attention.",
+            "priority": "high",
+            "impact_area": "delivery_risk",
+            "metric": "blocked_count",
+            "current_value": blocked,
+            "threshold": 5,
+        })
+    if overdue >= 10:
+        recommendations.append({
+            "title": f"{overdue} Overdue Issues",
+            "description": f"{overdue} issues are past their due date in {project_key}.",
+            "priority": "high",
+            "impact_area": "delivery_risk",
+            "metric": "overdue_count",
+            "current_value": overdue,
+            "threshold": 10,
+        })
+    if critical_open >= 5:
+        recommendations.append({
+            "title": f"{critical_open} Critical Issues Unresolved",
+            "description": f"{critical_open} critical/highest priority issues are still open in {project_key}.",
+            "priority": "high",
+            "impact_area": "quality_improvement",
+            "metric": "critical_open",
+            "current_value": critical_open,
+            "threshold": 5,
+        })
+    return recommendations
+
+
+async def generate_recommendations(project_key: str) -> dict:
+    """Generate 3-5 actionable recommendations for a project."""
+    kpi_recs = await _scan_kpis(project_key)
+    risk_recs = await _scan_risk(project_key)
+    issue_recs = await _scan_issues(project_key)
+
+    all_recs = kpi_recs + risk_recs + issue_recs
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    all_recs.sort(key=lambda r: priority_order.get(r.get("priority", "low"), 3))
+
+    seen = set()
+    unique = []
+    for r in all_recs:
+        key = r.get("title", "")
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    return {
+        "project_key": project_key,
+        "recommendations": unique[:8],
+        "total": len(unique),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -99,32 +308,27 @@ class TrendParam(BaseModel):
 
 @tool(
     name="get_project_kpis",
-    description="Get delivery, quality, risk, and data-quality KPIs for a project.",
+    description="Retrieve all KPIs for a project (delivery, quality, risk, DQ, team metrics).",
     params_model=ProjectKeyParam,
 )
 async def get_project_kpis(project_key: str) -> dict:
     async with get_db() as db:
-        rows = (await db.execute(
-            select(KPIResult).where(
-                KPIResult.project_key == project_key,
-                KPIResult.period_label == "1m",
-            ).order_by(KPIResult.calculation_date.desc())
-        )).scalars().all()
-    latest_date = None
-    kpis = []
-    seen = set()
-    for r in rows:
-        if r.kpi_name not in seen:
-            kpis.append(r.to_dict() if hasattr(r, "to_dict") else {
-                "name": r.kpi_name, "category": r.kpi_category,
-                "current_value": r.current_value, "previous_value": r.previous_value,
-                "trend": r.trend.value if r.trend else None,
-                "risk_level": r.risk_level.value if r.risk_level else None,
-            })
-            seen.add(r.kpi_name)
-        if latest_date is None:
-            latest_date = r.calculation_date.isoformat()
-    return {"project_key": project_key, "kpis": kpis, "as_of": latest_date}
+        stmt = select(KPIResult).where(
+            KPIResult.project_key == project_key,
+        ).order_by(KPIResult.calculation_date.desc()).limit(30)
+        rows = (await db.execute(stmt)).scalars().all()
+    kpis = [
+        {
+            "name": r.kpi_name,
+            "current_value": r.current_value,
+            "previous_value": r.previous_value,
+            "trend": r.trend,
+            "period_label": r.period_label,
+            "calculation_date": str(r.calculation_date),
+        }
+        for r in rows
+    ]
+    return {"project_key": project_key, "kpis": kpis, "total": len(kpis)}
 
 
 # ---------------------------------------------------------------------------
@@ -133,267 +337,10 @@ async def get_project_kpis(project_key: str) -> dict:
 
 @tool(
     name="get_risk_scores",
-    description="Get composite and dimension risk scores for a project.",
+    description="Get risk scores and risk dimensions for a project.",
     params_model=ProjectKeyParam,
 )
 async def get_risk_scores(project_key: str) -> dict:
-    async with get_db() as db:
-        row = (await db.execute(
-            select(RiskScore).where(
-                RiskScore.project_key == project_key,
-                RiskScore.period_label == "1m",
-            ).order_by(RiskScore.calculation_date.desc())
-        )).scalars().first()
-    if not row:
-        return {"project_key": project_key, "error": "No risk data found"}
-    return {
-        "project_key": project_key,
-        "composite_risk": row.composite_risk,
-        "risk_level": row.risk_level.value if row.risk_level else "unknown",
-        "delivery_risk": row.delivery_risk,
-        "quality_risk": row.quality_risk,
-        "compliance_risk": row.compliance_risk,
-        "operational_risk": row.operational_risk,
-        "risk_drivers": json.loads(row.risk_drivers) if row.risk_drivers else [],
-        "recommended_actions": json.loads(row.recommended_actions) if row.recommended_actions else [],
-        "as_of": row.calculation_date.isoformat(),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 3: search_issues
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="search_issues",
-    description="Search issues in a project with optional filters.",
-    params_model=SearchIssuesParam,
-)
-async def search_issues(project_key: str, issue_type: str | None = None,
-                        status: str | None = None, priority: str | None = None,
-                        limit: int = 20) -> dict:
-    async with get_db() as db:
-        q = select(FactIssue).where(FactIssue.project_key == project_key)
-        if issue_type:
-            q = q.where(FactIssue.issue_type == issue_type)
-        if status:
-            q = q.where(FactIssue.status == status)
-        if priority:
-            q = q.where(FactIssue.priority == priority)
-        q = q.order_by(FactIssue.created_date.desc()).limit(limit)
-        rows = (await db.execute(q)).scalars().all()
-    return {
-        "project_key": project_key,
-        "total": len(rows),
-        "issues": [
-            {
-                "key": r.jira_key,
-                "summary": r.summary,
-                "type": r.issue_type,
-                "status": r.status,
-                "priority": r.priority,
-                "assignee": r.assignee_id or "Unassigned",
-                "created": r.created_date.isoformat() if r.created_date else None,
-                "age_days": r.age_days,
-            }
-            for r in rows
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 4: get_exec_summary
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="get_exec_summary",
-    description="Executive summary with headline KPIs across all projects.",
-    params_model=ProjectKeyOptionalParam,
-)
-async def get_exec_summary(project_key: str = "CORE") -> dict:
-    async with get_db() as db:
-        projects = (await db.execute(
-            select(DimProject).where(DimProject.is_active == True)
-        )).scalars().all()
-
-        risk_rows = (await db.execute(
-            select(RiskScore).where(
-                RiskScore.period_label == "1m",
-            ).order_by(RiskScore.calculation_date.desc())
-        )).scalars().all()
-
-        issue_counts = (await db.execute(
-            select(
-                FactIssue.project_key,
-                func.count().label("total"),
-                func.sum(FactIssue.is_overdue.cast(Integer)).label("overdue"),
-            ).group_by(FactIssue.project_key)
-        )).all()
-
-    latest_risks = {}
-    for r in risk_rows:
-        if r.project_key not in latest_risks:
-            latest_risks[r.project_key] = r
-
-    project_summaries = []
-    total_open = 0
-    total_overdue = 0
-    for proj in projects:
-        risk = latest_risks.get(proj.id)
-        counts = next((ic for ic in issue_counts if ic[0] == proj.id), None)
-        open_count = counts.total if counts else 0
-        overdue_count = counts.overdue or 0 if counts else 0
-        total_open += open_count
-        total_overdue += overdue_count
-        project_summaries.append({
-            "key": proj.id,
-            "name": proj.name,
-            "risk_level": risk.risk_level.value if risk and risk.risk_level else "unknown",
-            "composite_risk": risk.composite_risk if risk else None,
-            "open_issues": open_count,
-            "overdue": overdue_count,
-        })
-
-    return {
-        "generated_at": date.today().isoformat(),
-        "total_projects": len(projects),
-        "overall": {
-            "total_open_issues": total_open,
-            "total_overdue": total_overdue,
-        },
-        "projects": project_summaries,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 5: compare_projects
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="compare_projects",
-    description="Side-by-side KPI comparison for multiple projects.",
-    params_model=CompareProjectsParam,
-)
-async def compare_projects(project_keys: str) -> dict:
-    keys = [k.strip() for k in project_keys.split(",") if k.strip()]
-    async with get_db() as db:
-        kpi_rows = (await db.execute(
-            select(KPIResult).where(
-                KPIResult.project_key.in_(keys),
-                KPIResult.period_label == "1m",
-            ).order_by(KPIResult.calculation_date.desc())
-        )).scalars().all()
-
-        risk_rows = (await db.execute(
-            select(RiskScore).where(
-                RiskScore.project_key.in_(keys),
-                RiskScore.period_label == "1m",
-            ).order_by(RiskScore.calculation_date.desc())
-        )).scalars().all()
-
-    latest_kpis: dict[str, dict] = {}
-    for r in kpi_rows:
-        if r.project_key not in latest_kpis:
-            latest_kpis[r.project_key] = {}
-        if r.kpi_name not in latest_kpis[r.project_key]:
-            latest_kpis[r.project_key][r.kpi_name] = r.current_value
-
-    latest_risks: dict[str, Any] = {}
-    for r in risk_rows:
-        if r.project_key not in latest_risks:
-            latest_risks[r.project_key] = {
-                "composite_risk": r.composite_risk,
-                "risk_level": r.risk_level.value if r.risk_level else "unknown",
-            }
-
-    return {
-        "projects": keys,
-        "kpis": latest_kpis,
-        "risks": latest_risks,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 6: get_sprint_analysis
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="get_sprint_analysis",
-    description="Sprint velocity, burndown, and scope change analysis.",
-    params_model=ProjectKeyParam,
-)
-async def get_sprint_analysis(project_key: str) -> dict:
-    analyzer = SprintAnalyzer(project_key)
-    async with get_db() as db:
-        sprints = await analyzer.analyze(db)
-    if not sprints:
-        return {"project_key": project_key, "sprints": [], "total": 0}
-    return {
-        "project_key": project_key,
-        "total": len(sprints),
-        "sprints": [
-            {
-                "id": s.sprint_id,
-                "name": s.name,
-                "state": s.state,
-                "total_committed": s.total_committed,
-                "total_completed": s.total_completed,
-                "carry_over": s.carry_over,
-                "scope_added": s.scope_added,
-                "scope_removed": s.scope_removed,
-                "velocity": s.velocity,
-                "predictability": s.predictability,
-            }
-            for s in sprints
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 7: get_trend
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="get_trend",
-    description="Time-series trend data for a specific KPI.",
-    params_model=TrendParam,
-)
-async def get_trend(project_key: str, kpi_name: str, days: int = 90) -> dict:
-    since = date.today() - timedelta(days=days)
-    async with get_db() as db:
-        rows = (await db.execute(
-            select(KPIResult).where(
-                KPIResult.project_key == project_key,
-                KPIResult.kpi_name == kpi_name,
-                KPIResult.calculation_date >= since,
-                KPIResult.period_label == "1m",
-            ).order_by(KPIResult.calculation_date.asc())
-        )).scalars().all()
-    return {
-        "project_key": project_key,
-        "kpi_name": kpi_name,
-        "data_points": [
-            {
-                "date": r.calculation_date.isoformat(),
-                "current_value": r.current_value,
-                "previous_value": r.previous_value,
-                "trend": r.trend.value if r.trend else None,
-            }
-            for r in rows
-        ],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool 8: get_recommendations
-# ---------------------------------------------------------------------------
-
-@tool(
-    name="get_recommendations",
-    description="Auto-generated action items based on current risk and KPI data.",
-    params_model=ProjectKeyParam,
-)
-async def get_recommendations(project_key: str) -> dict:
     async with get_db() as db:
         risk = (await db.execute(
             select(RiskScore).where(
@@ -401,11 +348,256 @@ async def get_recommendations(project_key: str) -> dict:
                 RiskScore.period_label == "1m",
             ).order_by(RiskScore.calculation_date.desc())
         )).scalars().first()
-    recommendations = []
-    if risk and risk.recommended_actions:
-        recommendations = json.loads(risk.recommended_actions)
+    if not risk:
+        return {"project_key": project_key, "error": "No risk data"}
+    drivers = json.loads(risk.risk_drivers) if risk.risk_drivers else []
+    actions = json.loads(risk.recommended_actions) if risk.recommended_actions else []
     return {
         "project_key": project_key,
-        "recommendations": recommendations,
-        "risk_level": risk.risk_level.value if risk and risk.risk_level else "unknown",
+        "composite_risk": risk.composite_risk,
+        "risk_level": risk.risk_level.value if risk.risk_level else "unknown",
+        "delivery_risk": risk.delivery_risk,
+        "quality_risk": risk.quality_risk,
+        "compliance_risk": risk.compliance_risk,
+        "operational_risk": risk.operational_risk,
+        "risk_drivers": drivers,
+        "recommended_actions": actions,
+        "period_label": risk.period_label,
+        "calculation_date": str(risk.calculation_date),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: search_issues
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    name="search_issues",
+    description="Search issues in a project with optional type and status filters.",
+    params_model=SearchIssuesParam,
+)
+async def search_issues(
+    project_key: str,
+    issue_type: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+) -> dict:
+    async with get_db() as db:
+        stmt = select(FactIssue).where(FactIssue.project_key == project_key)
+        if issue_type:
+            stmt = stmt.where(FactIssue.issue_type == issue_type.lower())
+        if status:
+            stmt = stmt.where(FactIssue.status == status)
+        stmt = stmt.order_by(FactIssue.updated_at.desc()).limit(limit)
+        rows = (await db.execute(stmt)).scalars().all()
+    issues = [
+        {
+            "key": r.issue_key,
+            "summary": r.summary[:120],
+            "status": r.status,
+            "priority": r.priority or "N/A",
+            "issue_type": r.issue_type,
+            "assignee": r.assignee or "Unassigned",
+            "created": str(r.created_at),
+        }
+        for r in rows
+    ]
+    return {"project_key": project_key, "issues": issues, "total": len(issues)}
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: get_exec_summary
+# ---------------------------------------------------------------------------
+
+EXECUTIVE_METRICS = [
+    "open_issues", "resolved_last_30d", "overdue_ratio",
+    "avg_lead_time", "bug_rate", "blocked_count",
+]
+
+
+@tool(
+    name="get_exec_summary",
+    description="Get a high-level executive summary for a project.",
+    params_model=ProjectKeyParam,
+)
+async def get_exec_summary(project_key: str) -> dict:
+    async with get_db() as db:
+        kpi_stmt = select(KPIResult).where(
+            KPIResult.project_key == project_key,
+            KPIResult.period_label == "1m",
+        )
+        kpis = (await db.execute(kpi_stmt)).scalars().all()
+        risk = (await db.execute(
+            select(RiskScore).where(
+                RiskScore.project_key == project_key,
+                RiskScore.period_label == "1m",
+            ).order_by(RiskScore.calculation_date.desc())
+        )).scalars().first()
+        total = (await db.execute(
+            select(func.count(FactIssue.id)).where(FactIssue.project_key == project_key)
+        )).scalar() or 0
+
+    kpi_map = {k.kpi_name: k.current_value for k in kpis}
+    metrics = {m: kpi_map.get(m) for m in EXECUTIVE_METRICS}
+
+    return {
+        "project_key": project_key,
+        "total_issues": total,
+        "metrics": metrics,
+        "risk_level": risk.risk_level.value if risk and risk.risk_level else "unknown",
+        "composite_risk": risk.composite_risk if risk else None,
+        "generated_at": str(date.today()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: compare_projects
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    name="compare_projects",
+    description="Compare KPIs and risk scores of two or more projects side-by-side.",
+    params_model=ProjectKeysParam,
+)
+async def compare_projects(project_keys: str) -> dict:
+    keys = [k.strip().upper() for k in project_keys.split(",") if k.strip()]
+    if not keys:
+        return {"error": "At least one project key required"}
+
+    kpis_result = {}
+    risks_result = {}
+
+    async with get_db() as db:
+        for pk in keys:
+            krows = (await db.execute(
+                select(KPIResult).where(
+                    KPIResult.project_key == pk,
+                    KPIResult.period_label == "1m",
+                ).order_by(KPIResult.calculation_date.desc()).limit(15)
+            )).scalars().all()
+            kpis_result[pk] = {r.kpi_name: r.current_value for r in krows}
+
+            rrow = (await db.execute(
+                select(RiskScore).where(
+                    RiskScore.project_key == pk,
+                    RiskScore.period_label == "1m",
+                ).order_by(RiskScore.calculation_date.desc())
+            )).scalars().first()
+            if rrow:
+                risks_result[pk] = {
+                    "composite_risk": rrow.composite_risk,
+                    "risk_level": rrow.risk_level.value if rrow.risk_level else "unknown",
+                    "delivery_risk": rrow.delivery_risk,
+                    "quality_risk": rrow.quality_risk,
+                }
+            else:
+                risks_result[pk] = {}
+
+    return {"projects": keys, "kpis": kpis_result, "risks": risks_result}
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: get_sprint_analysis
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    name="get_sprint_analysis",
+    description="Analyze sprints for a project: velocity, burndown, scope change.",
+    params_model=ProjectKeyParam,
+)
+async def get_sprint_analysis(project_key: str) -> dict:
+    async with get_db() as db:
+        from storage.models import DimSprint, FactIssue
+
+        stmt = select(
+            DimSprint.sprint_id,
+            DimSprint.name,
+            DimSprint.state,
+            DimSprint.start_date,
+            DimSprint.end_date,
+            DimSprint.total_committed,
+            DimSprint.total_completed,
+            DimSprint.total_added,
+            DimSprint.total_removed,
+        ).where(
+            DimSprint.project_key == project_key,
+        ).order_by(DimSprint.start_date.desc()).limit(10)
+        rows = (await db.execute(stmt)).all()
+
+    sprints = []
+    for r in rows:
+        vel = (r.total_completed or 0) / max(r.total_committed or 1, 1)
+        pred = min(vel * 100, 100.0)
+        sprints.append({
+            "sprint_id": r.sprint_id,
+            "name": r.name,
+            "state": r.state,
+            "start_date": str(r.start_date) if r.start_date else None,
+            "end_date": str(r.end_date) if r.end_date else None,
+            "total_committed": r.total_committed or 0,
+            "total_completed": r.total_completed or 0,
+            "total_added": r.total_added or 0,
+            "total_removed": r.total_removed or 0,
+            "velocity": round(vel, 2),
+            "predictability": round(pred, 1),
+        })
+
+    return {"project_key": project_key, "sprints": sprints, "total": len(sprints)}
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: get_trend
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    name="get_trend",
+    description="Get historical trend data for KPIs of a project.",
+    params_model=TrendParam,
+)
+async def get_trend(project_key: str, days: int = 90, kpi_name: str | None = None) -> dict:
+    async with get_db() as db:
+        stmt = select(KPIResult).where(
+            KPIResult.project_key == project_key,
+        )
+        if kpi_name:
+            stmt = stmt.where(KPIResult.kpi_name == kpi_name)
+        stmt = stmt.order_by(KPIResult.calculation_date.desc()).limit(365)
+        rows = (await db.execute(stmt)).scalars().all()
+
+    data_points = [
+        {
+            "date": str(r.calculation_date),
+            "kpi_name": r.kpi_name,
+            "current_value": r.current_value,
+            "trend": r.trend,
+            "period_label": r.period_label,
+        }
+        for r in rows
+    ]
+
+    name = kpi_name or "multiple"
+    return {
+        "project_key": project_key,
+        "kpi_name": name,
+        "days": days,
+        "data_points": data_points,
+        "total": len(data_points),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 8: get_recommendations
+# ---------------------------------------------------------------------------
+
+
+@tool(
+    name="get_recommendations",
+    description="Auto-generated action items based on current risk and KPI data.",
+    params_model=ProjectKeyParam,
+)
+async def get_recommendations(project_key: str) -> dict:
+    return await generate_recommendations(project_key)

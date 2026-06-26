@@ -213,6 +213,31 @@ async def job_embedding_pipeline() -> None:
     logger.info("job_done", job="embedding_pipeline", counts=counts)
 
 
+async def job_executive_report() -> None:
+    """Generate weekly executive reports for all active projects."""
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import DimProject
+    from ai_agent.agent import AgentOrchestrator
+
+    logger.info("job_start", job="executive_report")
+    agent = AgentOrchestrator()
+
+    async with get_db() as db:
+        projects = (await db.execute(
+            select(DimProject).where(DimProject.is_active == True)
+        )).scalars().all()
+
+    for project in projects:
+        try:
+            report = await agent.generate_executive_report(project.id, lang="en")
+            logger.info("report_generated", project=project.id, length=len(report))
+        except Exception as e:
+            logger.error("report_failed", project=project.id, error=str(e))
+
+    logger.info("job_done", job="executive_report", projects=len(projects))
+
+
 async def job_snapshot_maintenance() -> None:
     """Purge snapshots older than retention period."""
     from ingestion.snapshot_writer import SnapshotWriter
@@ -325,6 +350,15 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(day_of_week="fri", hour=4, minute=0),
         id="snapshot_maintenance",
         name="Weekly snapshot maintenance",
+        replace_existing=True,
+    )
+
+    # Executive report Monday at 06:00 UTC
+    scheduler.add_job(
+        job_executive_report,
+        CronTrigger(day_of_week="mon", hour=6, minute=0),
+        id="executive_report",
+        name="Weekly executive report generation",
         replace_existing=True,
     )
 

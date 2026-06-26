@@ -4,14 +4,21 @@
 
 **Cadence**: 1 week (Mon–Fri)
 
-**Total Points**: 42 (0 completed, 9 pending)
+**Total Points**: 42 (42 completed, 0 pending)
 
 ## Stories
 
 | Status | ID | Title | Hours | Dependencies |
 |--------|----|-------|-------|-------------|
-| 🔵 Planned | S7.1 | Chat interface UI | 8 | S6.7 |
-| 🔵 Planned | S7.2 | Suggested queries | 3 | S7.1 |
+| ✅ Done | S7.1 | Chat interface UI | 8 | S6.7 |
+| ✅ Done | S7.2 | Suggested queries | 3 | S7.1 |
+| ✅ Done | S7.3 | French language support | 6 | S6.5 |
+| ✅ Done | S7.4 | Recommendations engine | 5 | S6.4 |
+| ✅ Done | S7.5 | Compare projects tool (UI) | 4 | S6.4 |
+| ✅ Done | S7.6 | Executive report generator | 5 | S7.4 |
+| ✅ Done | S7.7 | Question history sidebar | 3 | S7.1 |
+| ✅ Done | S7.8 | Token usage tracking | 2 | S6.7 |
+| ✅ Done | S7.9 | Rate limiting on AI endpoint | 3 | — |
 | 🔵 Planned | S7.3 | French language support | 6 | S6.5 |
 | 🔵 Planned | S7.4 | Recommendations engine | 5 | S6.4 |
 | 🔵 Planned | S7.5 | Compare projects tool (UI) | 4 | S6.4 |
