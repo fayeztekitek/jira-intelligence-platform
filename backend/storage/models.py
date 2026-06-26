@@ -6,7 +6,7 @@ Star Schema:
   Dims:     DimProject, DimSprint, DimVersion, DimUser, DimComponent
   Audit:    ExtractionRun, KPIResult, RiskScore
 """
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Date,
@@ -57,8 +57,8 @@ class DimProject(Base):
     description = Column(Text)
     url = Column(String(512))
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     issues = relationship("FactIssue", back_populates="project")
     snapshots = relationship("FactSnapshot", back_populates="project")
@@ -73,7 +73,7 @@ class DimUser(Base):
     email = Column(String(255))
     is_active = Column(Boolean, default=True)
     timezone = Column(String(64))
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class DimComponent(Base):
@@ -178,7 +178,7 @@ class FactIssue(Base):
     dq_closed_without_resolution = Column(Boolean, default=False)
 
     # Metadata
-    last_synced_at = Column(DateTime, default=datetime.utcnow)
+    last_synced_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     raw_json = Column(Text)             # Compressed raw payload for audit
 
     project = relationship("DimProject", back_populates="issues")
@@ -296,7 +296,7 @@ class ExtractionRun(Base):
     run_id = Column(String(64), unique=True, nullable=False)
     run_type = Column(String(32))       # full | incremental | snapshot
     triggered_by = Column(String(64))   # scheduler | api | manual
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime)
     status = Column(SAEnum(RunStatus), default=RunStatus.RUNNING)
     projects_processed = Column(Integer, default=0)

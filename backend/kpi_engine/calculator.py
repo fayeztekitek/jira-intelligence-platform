@@ -255,9 +255,9 @@ class KPICalculator:
     # -----------------------------------------------------------------------
 
     def _bisect_range(self, dates: list, sorted_items: list, start: date, end: date) -> list:
-        """Return items where the corresponding date is in [start, end)."""
+        """Return items where the corresponding date is in [start, end]."""
         lo = bisect.bisect_left(dates, start)
-        hi = bisect.bisect_left(dates, end)
+        hi = bisect.bisect_right(dates, end)
         return sorted_items[lo:hi]
 
     def _window(self, start: date, end: date) -> list[IssueRecord]:

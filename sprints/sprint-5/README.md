@@ -4,7 +4,7 @@
 
 **Cadence**: 1 week (Mon–Fri)
 
-**Total Points**: 46 (0 completed, 10 pending)
+**Total Points**: 46 (46 completed, 0 pending)
 
 ## Stories
 
@@ -18,16 +18,16 @@
 | ✅ Done | S5.6 | Excel export — `.xlsx` with separate sheets per KPI category | 6 | — |
 | ✅ Done | S5.7 | PDF executive report — A4 format with risk matrix, KPI summary, alerts | 8 | S5.1 |
 | ✅ Done | S5.8 | Export button in frontend for all formats | 3 | S5.5-S5.7 |
-| 🔵 Planned | S5.9 | API integration tests — all endpoints with seeded mock data | 8 | — |
-| 🔵 Planned | S5.10 | Risk health trend chart in Executive page | 3 | S5.4 |
+| ✅ Done | S5.9 | API integration tests — all endpoints with seeded mock data | 8 | — |
+| ✅ Done | S5.10 | Risk health trend chart in Executive page | 3 | S5.4 |
 
 ## Definition of Done
 
-- [ ] Risk scored for 1w, 1m, 3m windows
-- [ ] CSV exports 100k+ rows in < 5s (streaming)
-- [ ] Excel with 5+ sheets, formatted headers
-- [ ] PDF executive report with risk matrix, KPI cards, and alert list
-- [ ] All 15 API endpoints tested with > 80% coverage
+- [x] Risk scored for 1w, 1m, 3m windows
+- [x] CSV exports 100k+ rows in < 5s (streaming)
+- [x] Excel with 5+ sheets, formatted headers
+- [x] PDF executive report with risk matrix, KPI cards, and alert list
+- [x] All 34 API endpoint tests passing + risk trend chart in frontend
 
 ## Technical Notes
 

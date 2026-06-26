@@ -34,7 +34,8 @@ from jira_connector.client import JiraClient
 from jira_connector.fields import FieldDiscoverer
 from storage.database import get_db
 from storage.models import (
-    DimProject, FactIssue, KPIResult, RiskScore, ExtractionRun, FactSnapshot
+    DimProject, DimVersion, FactIssue, FactTransition,
+    KPIResult, RiskScore, ExtractionRun, FactSnapshot,
 )
 
 router = APIRouter(prefix="/api")
@@ -796,13 +797,15 @@ async def export_issues_csv(
         batch = 500
         total_yielded = 0
         while total_yielded < max_rows:
+            remaining = max_rows - total_yielded
+            do_batch = batch if batch < remaining else remaining
             async with get_db() as db:
                 q = select(FactIssue).where(FactIssue.project_key == project_key)
                 if issue_type:
                     q = q.where(FactIssue.issue_type == issue_type)
                 if status:
                     q = q.where(FactIssue.status == status)
-                q = q.order_by(FactIssue.jira_key).limit(batch).offset(offset)
+                q = q.order_by(FactIssue.jira_key).limit(do_batch).offset(offset)
                 rows = (await db.execute(q)).scalars().all()
             if not rows:
                 break
