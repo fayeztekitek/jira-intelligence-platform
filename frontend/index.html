@@ -49,6 +49,12 @@ select, button { background: var(--surface2); border: 1px solid var(--border); c
 select:focus, button:focus { outline: 1px solid var(--blue); }
 button.primary { background: var(--blue); border-color: var(--blue); color: white; font-weight: 500; }
 button.primary:hover { background: #2563eb; }
+.export-dropdown { position: relative; }
+.export-btn { font-size: 13px; padding: 7px 12px; }
+.export-menu { display: none; position: absolute; top: 100%; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 4px; min-width: 160px; z-index: 200; box-shadow: 0 8px 24px rgba(0,0,0,0.3); overflow: hidden; }
+.export-menu.show { display: block; }
+.export-item { padding: 10px 14px; cursor: pointer; font-size: 13px; color: var(--muted); transition: all 0.12s; }
+.export-item:hover { background: var(--surface2); color: var(--text); }
 
 .content { padding: 24px 28px; }
 .page { display: none; }
@@ -243,6 +249,15 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <option value="6m">Last 6 months</option>
         <option value="1y">Last year</option>
       </select>
+      <div class="export-dropdown" id="exportDropdown">
+        <button class="export-btn" onclick="toggleExportMenu()">⬇ Export ▾</button>
+        <div class="export-menu" id="exportMenu">
+          <div class="export-item" onclick="exportCSV()">📄 CSV (.csv)</div>
+          <div class="export-item" onclick="exportExcel()">📊 Excel (.xlsx)</div>
+          <div class="export-item" onclick="exportPDF()">📋 PDF Report</div>
+        </div>
+      </div>
+      </select>
       <button class="primary" onclick="triggerSync()">⟳ Sync Now</button>
     </div>
   </div>
@@ -372,7 +387,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;">
           <input type="checkbox" id="overdueOnly" onchange="loadIssues()"> Overdue only
         </label>
-        <button onclick="exportCSV()" style="margin-left:auto">⬇ Export CSV</button>
+        <button onclick="exportCSV()" style="margin-left:auto">⬇ CSV</button>
       </div>
       <div class="table-card">
         <table>
@@ -1555,10 +1570,74 @@ async function loadTrends() {
   }
 }
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ─── Export (S5.8) ────────────────────────────────────────────────────────────
+function toggleExportMenu() {
+  document.getElementById('exportMenu').classList.toggle('show');
+}
+document.addEventListener('click', function(e) {
+  const dd = document.getElementById('exportDropdown');
+  if (dd && !dd.contains(e.target)) document.getElementById('exportMenu').classList.remove('show');
+});
+
 function exportCSV() {
-  const proj = currentProject || 'CORE';
-  window.location.href = `${API}/api/export/csv?project_key=${proj}`;
+  const proj = currentProject || '';
+  if (!proj) { showToast('Select a project first', 'warning', 3000); return; }
+  const url = `${API}/api/export/csv?project_key=${proj}&max_rows=100000`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${proj}_issues_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  document.getElementById('exportMenu')?.classList.remove('show');
+}
+
+async function exportExcel() {
+  const proj = currentProject || '';
+  if (!proj) { showToast('Select a project first', 'warning', 3000); return; }
+  showToast('Generating Excel export…', 'info', 0);
+  try {
+    const headers = {};
+    if (authToken && authToken !== 'anonymous') headers['Authorization'] = `Bearer ${authToken}`;
+    const r = await fetch(`${API}/api/export/xlsx?project_key=${proj}`, { headers });
+    if (!r.ok) throw new Error(`Export failed (${r.status})`);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${proj}_export_${new Date().toISOString().slice(0,10)}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    hideToast();
+  } catch(e) {
+    showToast(`Excel export failed: ${e.message}`, 'error', 5000);
+  }
+  document.getElementById('exportMenu')?.classList.remove('show');
+}
+
+async function exportPDF() {
+  const proj = currentProject || '';
+  if (!proj) { showToast('Select a project first', 'warning', 3000); return; }
+  showToast('Generating PDF report…', 'info', 0);
+  try {
+    const headers = {};
+    if (authToken && authToken !== 'anonymous') headers['Authorization'] = `Bearer ${authToken}`;
+    const r = await fetch(`${API}/api/export/pdf?project_key=${proj}`, { headers });
+    if (!r.ok) throw new Error(`Export failed (${r.status})`);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${proj}_report_${new Date().toISOString().slice(0,10)}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    hideToast();
+  } catch(e) {
+    showToast(`PDF export failed: ${e.message}`, 'error', 5000);
+  }
+  document.getElementById('exportMenu')?.classList.remove('show');
 }
 
 // ─── Sync ─────────────────────────────────────────────────────────────────────
