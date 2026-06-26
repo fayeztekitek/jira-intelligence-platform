@@ -27,30 +27,69 @@ logger = structlog.get_logger(__name__)
 settings = get_settings()
 
 
+async def _run_for_each_instance(job_fn, job_name: str, **kwargs):
+    """Run a job function for each active Jira instance."""
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import JiraInstance
+    from jira_connector.client import JiraClient, JiraInstanceConfig
+
+    logger.info("job_start", job=job_name)
+
+    # Always run for the default (env-configured) instance
+    instances = [(None, JiraInstanceConfig())]
+
+    async with get_db() as db:
+        db_instances = (await db.execute(
+            select(JiraInstance).where(
+                JiraInstance.is_active == True,
+                JiraInstance.sync_enabled == True,
+            )
+        )).scalars().all()
+        for inst in db_instances:
+            instances.append((
+                inst.id,
+                JiraInstanceConfig(
+                    instance_id=inst.id,
+                    name=inst.name,
+                    base_url=inst.base_url,
+                    auth_type=inst.auth_type,
+                    username=inst.username,
+                    api_token=inst.api_token,
+                    pat=inst.pat,
+                    project_keys=json.loads(inst.project_keys) if inst.project_keys else None,
+                ),
+            ))
+
+    total_runs = 0
+    for inst_id, config in instances:
+        try:
+            async with JiraClient(instance=config) as client:
+                extractor = JiraExtractor(client)
+                run_id = await job_fn(extractor, **kwargs)
+                if run_id:
+                    total_runs += 1
+                    logger.info("instance_done", job=job_name, instance=config.name, run_id=run_id)
+        except Exception as e:
+            logger.error("instance_failed", job=job_name, instance=config.name, error=str(e))
+
+    logger.info("job_done", job=job_name, instances=len(instances), total_runs=total_runs)
+
+
 async def job_incremental_extraction() -> None:
     """Incremental extraction: issues updated in last 25 hours."""
-    from jira_connector.client import JiraClient
-    from ingestion.extractor import JiraExtractor
-
-    logger.info("job_start", job="incremental_extraction")
-    async with JiraClient() as client:
-        extractor = JiraExtractor(client)
-        run_id = await extractor.run_incremental_extraction(
-            since_hours=25, triggered_by="scheduler"
+    async def _run(extractor, since_hours=25):
+        return await extractor.run_incremental_extraction(
+            since_hours=since_hours, triggered_by="scheduler"
         )
-    logger.info("job_done", job="incremental_extraction", run_id=run_id)
+    await _run_for_each_instance(_run, "incremental_extraction", since_hours=25)
 
 
 async def job_full_sync() -> None:
     """Full sync: all projects, all issues (weekly)."""
-    from jira_connector.client import JiraClient
-    from ingestion.extractor import JiraExtractor
-
-    logger.info("job_start", job="full_sync")
-    async with JiraClient() as client:
-        extractor = JiraExtractor(client)
-        run_id = await extractor.run_full_extraction(triggered_by="scheduler_weekly")
-    logger.info("job_done", job="full_sync", run_id=run_id)
+    async def _run(extractor):
+        return await extractor.run_full_extraction(triggered_by="scheduler_weekly")
+    await _run_for_each_instance(_run, "full_sync")
 
 
 async def job_calculate_kpis() -> None:
@@ -238,6 +277,50 @@ async def job_executive_report() -> None:
     logger.info("job_done", job="executive_report", projects=len(projects))
 
 
+async def job_data_retention() -> None:
+    """Purge old records based on retention policy configuration."""
+    from sqlalchemy import select, delete
+    from storage.database import get_db
+    from storage.models import RetentionPolicy, RETENTION_DEFAULTS
+    from datetime import datetime, timedelta, timezone
+
+    logger.info("job_start", job="data_retention")
+
+    async with get_db() as db:
+        # Ensure default policies exist
+        for table_name, days in RETENTION_DEFAULTS.items():
+            existing = (await db.execute(
+                select(RetentionPolicy).where(RetentionPolicy.table_name == table_name)
+            )).scalar_one_or_none()
+            if not existing:
+                db.add(RetentionPolicy(table_name=table_name, retention_days=days, updated_by="system"))
+        await db.commit()
+
+        policies = (await db.execute(
+            select(RetentionPolicy).where(RetentionPolicy.enabled == True)
+        )).scalars().all()
+
+    for policy in policies:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=policy.retention_days)
+            async with get_db() as db:
+                if policy.table_name == "audit_log":
+                    from storage.models import AuditLog
+                    stmt = delete(AuditLog).where(AuditLog.timestamp < cutoff)
+                else:
+                    logger.warning("unknown_retention_table", table=policy.table_name)
+                    continue
+                result = await db.execute(stmt)
+                await db.commit()
+                if result.rowcount:
+                    logger.info("retention_purged", table=policy.table_name,
+                                rows=result.rowcount, cutoff=cutoff.isoformat())
+        except Exception as e:
+            logger.error("retention_failed", table=policy.table_name, error=str(e))
+
+    logger.info("job_done", job="data_retention", policies=len(policies))
+
+
 async def job_snapshot_maintenance() -> None:
     """Purge snapshots older than retention period."""
     from ingestion.snapshot_writer import SnapshotWriter
@@ -340,6 +423,16 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour=3, minute=30),
         id="embedding_pipeline",
         name="Daily embedding generation",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Data retention daily at 05:00 UTC
+    scheduler.add_job(
+        job_data_retention,
+        CronTrigger(hour=5, minute=0),
+        id="data_retention",
+        name="Daily data retention cleanup",
         replace_existing=True,
         misfire_grace_time=3600,
     )

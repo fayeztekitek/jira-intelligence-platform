@@ -22,7 +22,7 @@ import json
 import os
 import time
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import structlog
@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import require_auth, UserSession
+from api.auth import require_auth, require_admin, UserSession
 from jira_connector.client import JiraClient
 from jira_connector.fields import FieldDiscoverer
 from storage.database import get_db
@@ -1006,4 +1006,712 @@ async def ai_usage(
             }
             for r in rows[:20]
         ],
+    }
+
+
+@router.post("/admin/rotate-key")
+async def rotate_api_key(user: AuthDep):
+    import secrets
+
+    if user.user_id != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can rotate the API key")
+
+    new_key = f"jip_{secrets.token_urlsafe(32)}"
+
+    logger.info("api_key_rotated", user=user.user_id)
+
+    return {
+        "message": "API key rotated successfully",
+        "new_api_key": new_key,
+        "note": "Save this key now — it will not be shown again",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Retention policy
+# ---------------------------------------------------------------------------
+
+class RetentionPolicyUpdate(BaseModel):
+    retention_days: int | None = None
+    enabled: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# User management (RBAC)
+# ---------------------------------------------------------------------------
+
+class UserCreate(BaseModel):
+    user_id: str = Field(min_length=2, max_length=128)
+    role: str = Field(default="viewer", pattern="^(admin|analyst|viewer)$")
+    projects: list[str] | None = None
+
+
+class UserUpdate(BaseModel):
+    role: str | None = Field(default=None, pattern="^(admin|analyst|viewer)$")
+    projects: list[str] | None = None
+    is_active: bool | None = None
+
+
+@router.get("/admin/users")
+async def list_users(user: Annotated[UserSession, Depends(require_admin)]):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import User
+
+    async with get_db() as db:
+        users = (await db.execute(
+            select(User).order_by(User.user_id)
+        )).scalars().all()
+
+    return [
+        {
+            "id": u.id,
+            "user_id": u.user_id,
+            "role": u.role,
+            "projects": json.loads(u.projects) if u.projects else None,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
+
+
+@router.post("/admin/users", status_code=201)
+async def create_user(body: UserCreate, user: Annotated[UserSession, Depends(require_admin)]):
+    import hashlib
+    import secrets
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import User
+
+    async with get_db() as db:
+        existing = (await db.execute(
+            select(User).where(User.user_id == body.user_id)
+        )).scalar_one_or_none()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"User '{body.user_id}' already exists")
+
+        raw_key = f"jip_{secrets.token_urlsafe(24)}"
+        hashed = hashlib.sha256(raw_key.encode()).hexdigest()
+
+        db_user = User(
+            user_id=body.user_id,
+            api_key_hash=hashed,
+            role=body.role,
+            projects=json.dumps(body.projects) if body.projects else None,
+        )
+        db.add(db_user)
+        await db.commit()
+        await db.refresh(db_user)
+
+    logger.info("user_created", user_id=body.user_id, role=body.role, created_by=user.user_id)
+
+    return {
+        "id": db_user.id,
+        "user_id": db_user.user_id,
+        "role": db_user.role,
+        "projects": body.projects,
+        "api_key": raw_key,
+        "note": "Save the API key now — it will not be shown again",
+    }
+
+
+@router.put("/admin/users/{user_id}")
+async def update_user(
+    user_id: str,
+    body: UserUpdate,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import User
+
+    async with get_db() as db:
+        db_user = (await db.execute(
+            select(User).where(User.user_id == user_id)
+        )).scalar_one_or_none()
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if body.role is not None:
+            db_user.role = body.role
+        if body.projects is not None:
+            db_user.projects = json.dumps(body.projects)
+        if body.is_active is not None:
+            db_user.is_active = body.is_active
+
+        await db.commit()
+        await db.refresh(db_user)
+
+    logger.info("user_updated", user_id=user_id, updated_by=user.user_id)
+
+    return {
+        "id": db_user.id,
+        "user_id": db_user.user_id,
+        "role": db_user.role,
+        "projects": json.loads(db_user.projects) if db_user.projects else None,
+        "is_active": db_user.is_active,
+    }
+
+
+@router.delete("/admin/users/{user_id}")
+async def deactivate_user(
+    user_id: str,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import User
+
+    if user_id == user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
+
+    async with get_db() as db:
+        db_user = (await db.execute(
+            select(User).where(User.user_id == user_id)
+        )).scalar_one_or_none()
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        db_user.is_active = False
+        await db.commit()
+
+    logger.info("user_deactivated", user_id=user_id, deactivated_by=user.user_id)
+    return {"message": f"User '{user_id}' deactivated"}
+
+
+# ---------------------------------------------------------------------------
+# Admin dashboard stats
+# ---------------------------------------------------------------------------
+
+@router.get("/admin/dashboard")
+async def admin_dashboard(user: Annotated[UserSession, Depends(require_admin)]):
+    from sqlalchemy import select, func
+    from storage.database import get_db
+    from storage.models import (
+        JiraInstance, WebhookConfig, User, AuditLog, ExtractionRun,
+        DimProject, FactIssue,
+    )
+
+    async with get_db() as db:
+        instance_count = (await db.execute(
+            select(func.count(JiraInstance.id))
+        )).scalar() or 0
+
+        webhook_count = (await db.execute(
+            select(func.count(WebhookConfig.id)).where(WebhookConfig.is_active == True)
+        )).scalar() or 0
+
+        user_count = (await db.execute(
+            select(func.count(User.id)).where(User.is_active == True)
+        )).scalar() or 0
+
+        project_count = (await db.execute(
+            select(func.count(DimProject.id)).where(DimProject.is_active == True)
+        )).scalar() or 0
+
+        issue_count = (await db.execute(
+            select(func.count(FactIssue.id))
+        )).scalar() or 0
+
+        last_sync = (await db.execute(
+            select(ExtractionRun.completed_at)
+            .where(ExtractionRun.status == "success")
+            .order_by(ExtractionRun.completed_at.desc())
+            .limit(1)
+        )).scalar()
+
+        recent_errors = (await db.execute(
+            select(func.count(AuditLog.id))
+            .where(
+                AuditLog.status_code >= 500,
+                AuditLog.timestamp >= func.now() - func.make_interval(hours=24),
+            )
+        )).scalar() or 0
+
+    return {
+        "instances": instance_count,
+        "active_webhooks": webhook_count,
+        "active_users": user_count,
+        "active_projects": project_count,
+        "total_issues": issue_count,
+        "last_sync_time": last_sync.isoformat() if last_sync else None,
+        "errors_last_24h": recent_errors,
+        "status": "healthy" if recent_errors < 10 else "degraded",
+    }
+
+
+@router.get("/admin/retention")
+async def get_retention_policies(user: AuthDep):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import RetentionPolicy
+
+    async with get_db() as db:
+        policies = (await db.execute(
+            select(RetentionPolicy).order_by(RetentionPolicy.table_name)
+        )).scalars().all()
+
+    return [
+        {
+            "id": p.id,
+            "table_name": p.table_name,
+            "retention_days": p.retention_days,
+            "enabled": p.enabled,
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        }
+        for p in policies
+    ]
+
+
+@router.put("/admin/retention/{policy_id}")
+async def update_retention_policy(
+    policy_id: int,
+    body: RetentionPolicyUpdate,
+    user: AuthDep,
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import RetentionPolicy
+
+    if user.user_id != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can modify retention policies")
+
+    async with get_db() as db:
+        policy = (await db.execute(
+            select(RetentionPolicy).where(RetentionPolicy.id == policy_id)
+        )).scalar_one_or_none()
+        if not policy:
+            raise HTTPException(status_code=404, detail="Policy not found")
+
+        if body.retention_days is not None:
+            policy.retention_days = body.retention_days
+        if body.enabled is not None:
+            policy.enabled = body.enabled
+        policy.updated_by = user.user_id
+
+        await db.commit()
+        await db.refresh(policy)
+
+    return {
+        "id": policy.id,
+        "table_name": policy.table_name,
+        "retention_days": policy.retention_days,
+        "enabled": policy.enabled,
+        "updated_at": policy.updated_at.isoformat() if policy.updated_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Webhook management
+# ---------------------------------------------------------------------------
+
+class WebhookCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    url: str = Field(max_length=512)
+    secret: str | None = None
+    events: list[str]
+    project_key: str | None = None
+
+
+class WebhookUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    secret: str | None = None
+    events: list[str] | None = None
+    project_key: str | None = None
+    is_active: bool | None = None
+
+
+@router.get("/admin/webhooks")
+async def list_webhooks(user: Annotated[UserSession, Depends(require_admin)]):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import WebhookConfig
+
+    async with get_db() as db:
+        webhooks = (await db.execute(
+            select(WebhookConfig).order_by(WebhookConfig.name)
+        )).scalars().all()
+
+    return [
+        {
+            "id": w.id,
+            "name": w.name,
+            "url": w.url,
+            "events": json.loads(w.events),
+            "project_key": w.project_key,
+            "is_active": w.is_active,
+            "created_at": w.created_at.isoformat() if w.created_at else None,
+        }
+        for w in webhooks
+    ]
+
+
+@router.post("/admin/webhooks", status_code=201)
+async def create_webhook(body: WebhookCreate, user: Annotated[UserSession, Depends(require_admin)]):
+    from storage.database import get_db
+    from storage.models import WebhookConfig
+    from api.webhooks import EVENT_TYPES
+
+    invalid = [e for e in body.events if e not in EVENT_TYPES]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid event types: {invalid}")
+
+    async with get_db() as db:
+        wh = WebhookConfig(
+            name=body.name,
+            url=body.url,
+            secret=body.secret,
+            events=json.dumps(body.events),
+            project_key=body.project_key,
+        )
+        db.add(wh)
+        await db.commit()
+        await db.refresh(wh)
+
+    logger.info("webhook_created", name=body.name, events=body.events, user=user.user_id)
+
+    return {
+        "id": wh.id,
+        "name": wh.name,
+        "url": wh.url,
+        "events": body.events,
+        "project_key": wh.project_key,
+        "is_active": wh.is_active,
+    }
+
+
+@router.put("/admin/webhooks/{webhook_id}")
+async def update_webhook(
+    webhook_id: int,
+    body: WebhookUpdate,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import WebhookConfig
+    from api.webhooks import EVENT_TYPES
+
+    async with get_db() as db:
+        wh = (await db.execute(
+            select(WebhookConfig).where(WebhookConfig.id == webhook_id)
+        )).scalar_one_or_none()
+        if not wh:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+
+        if body.name is not None:
+            wh.name = body.name
+        if body.url is not None:
+            wh.url = body.url
+        if body.secret is not None:
+            wh.secret = body.secret
+        if body.events is not None:
+            invalid = [e for e in body.events if e not in EVENT_TYPES]
+            if invalid:
+                raise HTTPException(status_code=400, detail=f"Invalid event types: {invalid}")
+            wh.events = json.dumps(body.events)
+        if body.project_key is not None:
+            wh.project_key = body.project_key
+        if body.is_active is not None:
+            wh.is_active = body.is_active
+
+        await db.commit()
+        await db.refresh(wh)
+
+    logger.info("webhook_updated", webhook_id=webhook_id, user=user.user_id)
+
+    return {
+        "id": wh.id,
+        "name": wh.name,
+        "url": wh.url,
+        "events": json.loads(wh.events),
+        "project_key": wh.project_key,
+        "is_active": wh.is_active,
+    }
+
+
+@router.delete("/admin/webhooks/{webhook_id}")
+async def delete_webhook(
+    webhook_id: int,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import WebhookConfig
+
+    async with get_db() as db:
+        wh = (await db.execute(
+            select(WebhookConfig).where(WebhookConfig.id == webhook_id)
+        )).scalar_one_or_none()
+        if not wh:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+
+        await db.delete(wh)
+        await db.commit()
+
+    logger.info("webhook_deleted", webhook_id=webhook_id, user=user.user_id)
+    return {"message": "Webhook deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Jira instance management (Multi-Jira)
+# ---------------------------------------------------------------------------
+
+class JiraInstanceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    base_url: str = Field(max_length=512)
+    auth_type: str = Field(default="api_token", pattern="^(api_token|pat)$")
+    username: str | None = None
+    api_token: str | None = None
+    pat: str | None = None
+    project_keys: list[str] | None = None
+
+
+class JiraInstanceUpdate(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    auth_type: str | None = None
+    username: str | None = None
+    api_token: str | None = None
+    pat: str | None = None
+    project_keys: list[str] | None = None
+    is_active: bool | None = None
+    sync_enabled: bool | None = None
+
+
+@router.get("/admin/instances")
+async def list_jira_instances(user: Annotated[UserSession, Depends(require_admin)]):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import JiraInstance
+
+    async with get_db() as db:
+        instances = (await db.execute(
+            select(JiraInstance).order_by(JiraInstance.name)
+        )).scalars().all()
+
+    return [
+        {
+            "id": i.id,
+            "name": i.name,
+            "base_url": i.base_url,
+            "auth_type": i.auth_type,
+            "project_keys": json.loads(i.project_keys) if i.project_keys else None,
+            "is_active": i.is_active,
+            "sync_enabled": i.sync_enabled,
+            "created_at": i.created_at.isoformat() if i.created_at else None,
+        }
+        for i in instances
+    ]
+
+
+@router.post("/admin/instances", status_code=201)
+async def create_jira_instance(
+    body: JiraInstanceCreate,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from storage.database import get_db
+    from storage.models import JiraInstance
+
+    async with get_db() as db:
+        existing = (await db.execute(
+            select(JiraInstance).where(JiraInstance.name == body.name)
+        )).scalar_one_or_none()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Instance '{body.name}' already exists")
+
+        instance = JiraInstance(
+            name=body.name,
+            base_url=body.base_url,
+            auth_type=body.auth_type,
+            username=body.username,
+            api_token=body.api_token,
+            pat=body.pat,
+            project_keys=json.dumps(body.project_keys) if body.project_keys else None,
+        )
+        db.add(instance)
+        await db.commit()
+        await db.refresh(instance)
+
+    logger.info("jira_instance_created", name=body.name, user=user.user_id)
+
+    return {
+        "id": instance.id,
+        "name": instance.name,
+        "base_url": instance.base_url,
+        "auth_type": instance.auth_type,
+        "project_keys": json.loads(instance.project_keys) if instance.project_keys else None,
+        "is_active": instance.is_active,
+        "sync_enabled": instance.sync_enabled,
+    }
+
+
+@router.put("/admin/instances/{instance_id}")
+async def update_jira_instance(
+    instance_id: int,
+    body: JiraInstanceUpdate,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import JiraInstance
+
+    async with get_db() as db:
+        instance = (await db.execute(
+            select(JiraInstance).where(JiraInstance.id == instance_id)
+        )).scalar_one_or_none()
+        if not instance:
+            raise HTTPException(status_code=404, detail="Instance not found")
+
+        if body.name is not None:
+            instance.name = body.name
+        if body.base_url is not None:
+            instance.base_url = body.base_url
+        if body.auth_type is not None:
+            instance.auth_type = body.auth_type
+        if body.username is not None:
+            instance.username = body.username
+        if body.api_token is not None:
+            instance.api_token = body.api_token
+        if body.pat is not None:
+            instance.pat = body.pat
+        if body.project_keys is not None:
+            instance.project_keys = json.dumps(body.project_keys)
+        if body.is_active is not None:
+            instance.is_active = body.is_active
+        if body.sync_enabled is not None:
+            instance.sync_enabled = body.sync_enabled
+
+        await db.commit()
+        await db.refresh(instance)
+
+    logger.info("jira_instance_updated", instance_id=instance_id, user=user.user_id)
+
+    return {
+        "id": instance.id,
+        "name": instance.name,
+        "base_url": instance.base_url,
+        "auth_type": instance.auth_type,
+        "project_keys": json.loads(instance.project_keys) if instance.project_keys else None,
+        "is_active": instance.is_active,
+        "sync_enabled": instance.sync_enabled,
+    }
+
+
+@router.delete("/admin/instances/{instance_id}")
+async def delete_jira_instance(
+    instance_id: int,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import JiraInstance
+
+    async with get_db() as db:
+        instance = (await db.execute(
+            select(JiraInstance).where(JiraInstance.id == instance_id)
+        )).scalar_one_or_none()
+        if not instance:
+            raise HTTPException(status_code=404, detail="Instance not found")
+
+        await db.delete(instance)
+        await db.commit()
+
+    logger.info("jira_instance_deleted", instance_id=instance_id, user=user.user_id)
+    return {"message": "Instance deleted"}
+
+
+@router.post("/admin/instances/{instance_id}/test")
+async def test_jira_connection(
+    instance_id: int,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from jira_connector.client import JiraClient, JiraInstanceConfig
+
+    async with get_db() as db:
+        from storage.models import JiraInstance
+        instance = (await db.execute(
+            select(JiraInstance).where(JiraInstance.id == instance_id)
+        )).scalar_one_or_none()
+        if not instance:
+            raise HTTPException(status_code=404, detail="Instance not found")
+
+    config = JiraInstanceConfig(
+        instance_id=instance.id,
+        name=instance.name,
+        base_url=instance.base_url,
+        auth_type=instance.auth_type,
+        username=instance.username,
+        api_token=instance.api_token,
+        pat=instance.pat,
+    )
+
+    try:
+        async with JiraClient(instance=config) as client:
+            projects = await client.list_projects()
+        return {
+            "success": True,
+            "project_count": len(projects),
+            "projects": [p.key for p in projects[:20]],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Connection failed: {e}")
+
+
+@router.get("/admin/webhooks/events")
+async def list_webhook_events(user: Annotated[UserSession, Depends(require_admin)]):
+    from api.webhooks import EVENT_TYPES
+    return {"event_types": sorted(EVENT_TYPES)}
+
+
+@router.post("/admin/webhooks/{webhook_id}/test")
+async def test_webhook(
+    webhook_id: int,
+    user: Annotated[UserSession, Depends(require_admin)],
+):
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import WebhookConfig
+    from api.webhooks import dispatch_event
+
+    async with get_db() as db:
+        wh = (await db.execute(
+            select(WebhookConfig).where(WebhookConfig.id == webhook_id)
+        )).scalar_one_or_none()
+        if not wh:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+
+    results = await dispatch_event("webhook.test", {
+        "event": "webhook.test",
+        "webhook_id": wh.id,
+        "webhook_name": wh.name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# Webhook receiver (public, for external systems to push events)
+# ---------------------------------------------------------------------------
+
+@router.post("/webhooks/receive/{event_type}")
+async def receive_webhook(
+    event_type: str,
+    payload: dict,
+):
+    from api.webhooks import EVENT_TYPES, dispatch_event
+
+    if event_type not in EVENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unknown event type: {event_type}")
+
+    project_key = payload.get("project_key")
+    results = await dispatch_event(event_type, payload, project_key)
+
+    return {
+        "received": True,
+        "event_type": event_type,
+        "dispatched": len(results),
+        "results": results,
     }

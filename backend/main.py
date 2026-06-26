@@ -2,15 +2,16 @@
 main.py — FastAPI application entry point.
 """
 import logging
+import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import os
+from fastapi.responses import FileResponse, Response
 
 from config import get_settings
 from storage.database import init_db
@@ -101,8 +102,100 @@ app.add_middleware(
 
 logger.info("cors_configured", origins=origins, env=settings.app_env)
 
+# ---------------------------------------------------------------------------
+# Security headers middleware
+# ---------------------------------------------------------------------------
+
+_MAX_BODY_SIZE = 1_048_576  # 1 MB
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    # Body size check
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > _MAX_BODY_SIZE:
+        return Response(status_code=413, content="Request body too large (max 1MB)")
+    response: Response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if settings.app_env == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Security: .well-known/security.txt
+# ---------------------------------------------------------------------------
+
+@app.get("/.well-known/security.txt")
+async def security_txt():
+    return Response(
+        content=(
+            "Contact: mailto:security@example.com\n"
+            f"Expires: 2027-06-26T00:00:00.000Z\n"
+            "Preferred-Languages: en, fr\n"
+            "Canonical: https://jira-intel.example.com/.well-known/security.txt\n"
+        ),
+        media_type="text/plain",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Audit logging middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def audit_logging(request: Request, call_next):
+    start = time.monotonic()
+    response: Response = await call_next(request)
+    latency = round((time.monotonic() - start) * 1000, 1)
+
+    is_api = request.url.path.startswith("/api/")
+    if is_api:
+        from api.metrics import observe_request
+        observe_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            latency=latency / 1000.0,
+        )
+        try:
+            from storage.database import get_db
+            from storage.models import AuditLog
+
+            user_id = "anonymous"
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Bearer "):
+                from api.auth import decode_token
+                payload = decode_token(auth[7:])
+                if payload:
+                    user_id = payload.get("sub", "unknown")
+
+            async with get_db() as db:
+                entry = AuditLog(
+                    user_id=user_id,
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=response.status_code,
+                    latency_ms=latency,
+                    ip_address=request.client.host if request.client else None,
+                )
+                db.add(entry)
+                await db.commit()
+        except Exception as e:
+            logger.warning("audit_log_failed", error=str(e))
+
+    return response
+
+
 app.include_router(auth_router)
 app.include_router(router)
+
+# Prometheus metrics endpoint (outside router so it's always available)
+from api.metrics import metrics_endpoint
+app.add_route("/api/metrics", metrics_endpoint, methods=["GET"], include_in_schema=False)
 
 # Serve frontend static files if they exist
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")

@@ -35,16 +35,51 @@ class JiraAPIError(Exception):
         super().__init__(f"Jira API error {status_code}: {message}")
 
 
+class JiraInstanceConfig:
+    """Configuration for a single Jira instance (from DB or env)."""
+    def __init__(
+        self,
+        instance_id: int | None = None,
+        name: str = "default",
+        base_url: str = "",
+        auth_type: str = "api_token",
+        username: str | None = None,
+        api_token: str | None = None,
+        pat: str | None = None,
+        project_keys: list[str] | None = None,
+    ):
+        self.instance_id = instance_id
+        self.name = name
+        self.base_url = base_url.rstrip("/")
+        self.auth_type = auth_type
+        self.username = username
+        self.api_token = api_token
+        self.pat = pat
+        self.project_keys = project_keys
+
+
 class JiraClient:
     """
     Async Jira REST API v2/v3 client.
     Thread-safe, suitable for use in FastAPI and APScheduler.
     """
 
-    def __init__(self):
+    def __init__(self, instance: JiraInstanceConfig | None = None):
         self.settings = get_settings()
         self._client: httpx.AsyncClient | None = None
         self.api_call_count = 0
+        self.instance = instance or self._default_instance()
+
+    @staticmethod
+    def _default_instance() -> JiraInstanceConfig:
+        settings = get_settings()
+        return JiraInstanceConfig(
+            base_url=settings.jira_base_url,
+            auth_type=settings.jira_auth_type,
+            username=settings.jira_username,
+            api_token=settings.jira_api_token,
+            pat=settings.jira_pat,
+        )
 
     def _build_headers(self) -> dict:
         headers = {
@@ -52,19 +87,19 @@ class JiraClient:
             "Content-Type": "application/json",
             "X-Atlassian-Token": "no-check",
         }
-        auth_type = self.settings.jira_auth_type
-        if auth_type == "api_token":
-            creds = f"{self.settings.jira_username}:{self.settings.jira_api_token}"
+        cfg = self.instance
+        if cfg.auth_type == "api_token" and cfg.username and cfg.api_token:
+            creds = f"{cfg.username}:{cfg.api_token}"
             encoded = base64.b64encode(creds.encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
-        elif auth_type == "pat":
-            headers["Authorization"] = f"Bearer {self.settings.jira_pat}"
+        elif cfg.auth_type == "pat" and cfg.pat:
+            headers["Authorization"] = f"Bearer {cfg.pat}"
         return headers
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                base_url=self.settings.jira_base_url,
+                base_url=self.instance.base_url,
                 headers=self._build_headers(),
                 timeout=httpx.Timeout(30.0, connect=10.0),
                 follow_redirects=True,
