@@ -247,6 +247,7 @@ def _row_to_record(row) -> "IssueRecord":
         dq_missing_epic=row.dq_missing_epic or False,
         dq_missing_due_date=row.dq_missing_due_date or False,
         dq_closed_without_resolution=row.dq_closed_without_resolution or False,
+        labels=_parse_list(row.labels),
         story_points=row.story_points,
         sprint_ids=_parse_list(row.sprint_ids),
     )
