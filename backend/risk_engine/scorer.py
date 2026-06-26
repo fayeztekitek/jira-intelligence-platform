@@ -23,6 +23,7 @@ from typing import Any
 
 import structlog
 
+from config import get_settings
 from kpi_engine.calculator import ProjectKPIs, KPIValue
 
 logger = structlog.get_logger(__name__)
@@ -61,10 +62,11 @@ class RiskScoreResult:
     compliance: DimensionScore
     operational: DimensionScore
     composite_score: float
-    risk_level: str         # low | medium | high | critical
+    risk_level: str
     risk_drivers: list[str]
     recommended_actions: list[str]
     weights: dict[str, float]
+    period_label: str = "1m"
 
     def to_dict(self) -> dict:
         return {
@@ -113,7 +115,7 @@ class RiskScorer:
         reference_period: str = "1m",
     ):
         self.kpis = kpis
-        self.weights = weights or DEFAULT_WEIGHTS
+        self.weights = weights or get_settings().risk_weights
         self.period = reference_period
         self._validate_weights()
 
@@ -150,6 +152,7 @@ class RiskScorer:
         return RiskScoreResult(
             project_key=self.kpis.project_key,
             calculated_at=self.kpis.calculated_at,
+            period_label=self.period,
             delivery=delivery,
             quality=quality,
             compliance=compliance,

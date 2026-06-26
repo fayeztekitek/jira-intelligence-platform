@@ -184,6 +184,7 @@ class IssueRecord:
     dq_missing_due_date: bool
     dq_closed_without_resolution: bool
     story_points: float | None
+    labels: list[str] | None = None
     sprint_ids: list[int] | None = None
 
 
@@ -254,9 +255,9 @@ class KPICalculator:
     # -----------------------------------------------------------------------
 
     def _bisect_range(self, dates: list, sorted_items: list, start: date, end: date) -> list:
-        """Return items where the corresponding date is in [start, end)."""
+        """Return items where the corresponding date is in [start, end]."""
         lo = bisect.bisect_left(dates, start)
-        hi = bisect.bisect_left(dates, end)
+        hi = bisect.bisect_right(dates, end)
         return sorted_items[lo:hi]
 
     def _window(self, start: date, end: date) -> list[IssueRecord]:
@@ -739,6 +740,85 @@ class KPICalculator:
             threshold_high=10,
             recommended_action="Escalate critical open issues to engineering management.",
             contributing_count=len(crit_open),
+        ))
+
+        # --- Blocked critical open ---
+        blocked_crit = [i for i in open_now
+                        if i.priority in ("Critical", "Blocker", "Highest")
+                        and (("blocked" in (i.status or "").lower())
+                             or (i.labels and any("blocked" in lbl.lower() for lbl in i.labels)))]
+        prev_blocked = [i for i in open_prev
+                        if i.priority in ("Critical", "Blocker", "Highest")
+                        and (("blocked" in (i.status or "").lower())
+                             or (i.labels and any("blocked" in lbl.lower() for lbl in i.labels)))]
+        self._add(KPIValue(
+            name="blocked_critical_open",
+            category="risk",
+            period_label=label,
+            current_value=len(blocked_crit),
+            previous_value=len(prev_blocked),
+            unit="count",
+            formula="COUNT(open critical/blocker issues WHERE status contains 'blocked' OR labels contain 'blocked')",
+            interpretation="Critical issues blocked. Each is a delivery showstopper.",
+            threshold_low=1,
+            threshold_high=5,
+            recommended_action="Unblock critical issues within 24 hours; escalate if stuck >48h.",
+            contributing_count=len(blocked_crit),
+        ))
+
+        # --- Aging critical open (>14 days) ---
+        aging_crit = [i for i in open_now
+                      if i.priority in ("Critical", "Blocker", "Highest")
+                      and (i.age_days or 0) > 14]
+        prev_aging = [i for i in open_prev
+                      if i.priority in ("Critical", "Blocker", "Highest")
+                      and (i.age_days or 0) > 14]
+        self._add(KPIValue(
+            name="aging_critical_open",
+            category="risk",
+            period_label=label,
+            current_value=len(aging_crit),
+            previous_value=len(prev_aging),
+            unit="count",
+            formula="COUNT(open critical/blocker issues WHERE age_days > 14)",
+            interpretation="Critical issues open >14 days. Extended exposure to severe defects.",
+            threshold_low=2,
+            threshold_high=8,
+            recommended_action="Prioritise aging critical issues for immediate resolution.",
+            contributing_count=len(aging_crit),
+        ))
+
+        # --- SLA at risk ---
+        resolved_times = [i.resolution_time_days for i in self.issues
+                          if i.resolution_time_days is not None]
+        avg_resolution = statistics.mean(resolved_times) if resolved_times else None
+        sla_at_risk_count = 0
+        if avg_resolution and avg_resolution > 0:
+            sla_at_risk_count = len([
+                i for i in open_now
+                if i.status_category != "Done"
+                and (i.age_days or 0) > avg_resolution * 0.8
+            ])
+        prev_sla_count = 0
+        if avg_resolution and avg_resolution > 0:
+            prev_sla_count = len([
+                i for i in open_prev
+                if i.status_category != "Done"
+                and (i.age_days or 0) > avg_resolution * 0.8
+            ])
+        self._add(KPIValue(
+            name="sla_at_risk",
+            category="risk",
+            period_label=label,
+            current_value=sla_at_risk_count,
+            previous_value=prev_sla_count,
+            unit="count",
+            formula="COUNT(open issues WHERE age_days > avg_resolution_days × 0.8)",
+            interpretation="Unresolved issues consuming >80% of mean resolution SLA. Risk of breach.",
+            threshold_low=5,
+            threshold_high=15,
+            recommended_action="Review at-risk issues; re-prioritise or add resources.",
+            contributing_count=sla_at_risk_count,
         ))
 
     # -----------------------------------------------------------------------

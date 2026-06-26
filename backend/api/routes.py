@@ -34,7 +34,8 @@ from jira_connector.client import JiraClient
 from jira_connector.fields import FieldDiscoverer
 from storage.database import get_db
 from storage.models import (
-    DimProject, FactIssue, KPIResult, RiskScore, ExtractionRun, FactSnapshot
+    DimProject, DimVersion, FactIssue, FactTransition,
+    KPIResult, RiskScore, ExtractionRun, FactSnapshot,
 )
 
 router = APIRouter(prefix="/api")
@@ -397,6 +398,41 @@ async def get_project_snapshots(
     }
 
 
+@router.get("/projects/{project_key}/risk/history")
+async def get_project_risk_history(
+    user: AuthDep,
+    project_key: str,
+    days: int = Query(90, description="Days of history"),
+    period: str = Query("1m", description="Period: 1w|1m|3m"),
+):
+    since = date.today() - timedelta(days=days)
+    async with get_db() as db:
+        rows = (await db.execute(
+            select(RiskScore).where(
+                RiskScore.project_key == project_key,
+                RiskScore.calculation_date >= since,
+                RiskScore.period_label == period,
+            ).order_by(RiskScore.calculation_date.asc())
+        )).scalars().all()
+
+    return {
+        "project_key": project_key,
+        "period": period,
+        "history": [
+            {
+                "date": r.calculation_date.isoformat(),
+                "composite_risk": r.composite_risk,
+                "risk_level": r.risk_level.value if r.risk_level else "low",
+                "delivery": r.delivery_risk,
+                "quality": r.quality_risk,
+                "compliance": r.compliance_risk,
+                "operational": r.operational_risk,
+            }
+            for r in rows
+        ],
+    }
+
+
 # Risk
 # ---------------------------------------------------------------------------
 
@@ -405,16 +441,23 @@ async def get_project_risk(
     user: AuthDep,
     project_key: str,
     as_of: str | None = Query(None),
+    period: str = Query("1m", description="Period: 1w|1m|3m"),
 ):
     calc_date = date.fromisoformat(as_of) if as_of else None
     async with get_db() as db:
-        q = select(RiskScore).where(RiskScore.project_key == project_key)
+        q = select(RiskScore).where(
+            RiskScore.project_key == project_key,
+            RiskScore.period_label == period,
+        )
         if calc_date:
             q = q.where(RiskScore.calculation_date == calc_date)
         else:
             subq = (
                 select(func.max(RiskScore.calculation_date))
-                .where(RiskScore.project_key == project_key)
+                .where(
+                    RiskScore.project_key == project_key,
+                    RiskScore.period_label == period,
+                )
                 .scalar_subquery()
             )
             q = q.where(RiskScore.calculation_date == subq)
@@ -426,6 +469,7 @@ async def get_project_risk(
 
     return {
         "project_key": project_key,
+        "period": period,
         "calculated_at": row.calculation_date.isoformat(),
         "composite_risk": row.composite_risk,
         "risk_level": row.risk_level.value if row.risk_level else "low",
@@ -692,45 +736,100 @@ async def sync_status(user: AuthDep, limit: int = Query(10)):
 # Export
 # ---------------------------------------------------------------------------
 
+@router.get("/export/xlsx")
+async def export_issues_xlsx(
+    user: AuthDep,
+    project_key: str = Query(...),
+):
+    from api.export import build_xlsx
+
+    async with get_db() as db:
+        kpis = (await db.execute(
+            select(KPIResult).where(KPIResult.project_key == project_key)
+        )).scalars().all()
+
+        issues = (await db.execute(
+            select(FactIssue).where(FactIssue.project_key == project_key)
+            .order_by(FactIssue.jira_key)
+        )).scalars().all()
+
+    buf = await build_xlsx(project_key, kpis, issues)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={project_key}_export.xlsx"},
+    )
+
+
+@router.get("/export/pdf")
+async def export_pdf_report(
+    user: AuthDep,
+    project_key: str = Query(...),
+):
+    from api.export import build_pdf
+
+    buf = await build_pdf(project_key)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={project_key}_report.pdf"},
+    )
+
 @router.get("/export/csv")
 async def export_issues_csv(
     user: AuthDep,
     project_key: str = Query(...),
     issue_type: str | None = Query(None),
     status: str | None = Query(None),
+    max_rows: int = Query(10000, description="Maximum rows to export", le=100000),
 ):
-    async with get_db() as db:
-        q = select(FactIssue).where(FactIssue.project_key == project_key)
-        if issue_type:
-            q = q.where(FactIssue.issue_type == issue_type)
-        if status:
-            q = q.where(FactIssue.status == status)
-        rows = (await db.execute(q)).scalars().all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
+    HEADERS = [
         "Key", "Summary", "Type", "Status", "Priority", "Assignee",
         "Created", "Resolved", "Age (days)", "Resolution Time (days)",
         "Overdue", "Times Reopened", "Missing Assignee", "Missing Priority",
-    ])
-    for r in rows:
-        writer.writerow([
-            r.jira_key, r.summary, r.issue_type, r.status, r.priority,
-            r.assignee_id or "",
-            r.created_date.isoformat() if r.created_date else "",
-            r.resolved_date.isoformat() if r.resolved_date else "",
-            r.age_days or "",
-            r.resolution_time_days or "",
-            "Yes" if r.is_overdue else "No",
-            r.times_reopened or 0,
-            "Yes" if r.dq_missing_assignee else "No",
-            "Yes" if r.dq_missing_priority else "No",
-        ])
+    ]
 
-    output.seek(0)
+    async def row_stream():
+        hdr = io.StringIO()
+        csv.writer(hdr).writerow(HEADERS)
+        yield hdr.getvalue()
+        offset = 0
+        batch = 500
+        total_yielded = 0
+        while total_yielded < max_rows:
+            remaining = max_rows - total_yielded
+            do_batch = batch if batch < remaining else remaining
+            async with get_db() as db:
+                q = select(FactIssue).where(FactIssue.project_key == project_key)
+                if issue_type:
+                    q = q.where(FactIssue.issue_type == issue_type)
+                if status:
+                    q = q.where(FactIssue.status == status)
+                q = q.order_by(FactIssue.jira_key).limit(do_batch).offset(offset)
+                rows = (await db.execute(q)).scalars().all()
+            if not rows:
+                break
+            chunk = io.StringIO()
+            w = csv.writer(chunk)
+            for r in rows:
+                w.writerow([
+                    r.jira_key, r.summary, r.issue_type, r.status, r.priority,
+                    r.assignee_id or "",
+                    r.created_date.isoformat() if r.created_date else "",
+                    r.resolved_date.isoformat() if r.resolved_date else "",
+                    r.age_days or "",
+                    r.resolution_time_days or "",
+                    "Yes" if r.is_overdue else "No",
+                    r.times_reopened or 0,
+                    "Yes" if r.dq_missing_assignee else "No",
+                    "Yes" if r.dq_missing_priority else "No",
+                ])
+            yield chunk.getvalue()
+            offset += batch
+            total_yielded += len(rows)
+
     return StreamingResponse(
-        iter([output.getvalue()]),
+        row_stream(),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={project_key}_issues.csv"},
     )

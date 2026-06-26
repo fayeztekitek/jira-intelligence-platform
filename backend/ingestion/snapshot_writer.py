@@ -87,13 +87,14 @@ class SnapshotWriter:
         return written
 
     async def write_risk_score(self, risk: RiskScoreResult) -> None:
-        """Upsert risk score for a project/date."""
+        """Upsert risk score for a project/date/period."""
         import json
         async with get_db() as db:
             result = await db.execute(
                 select(RiskScore).where(
                     RiskScore.project_key == risk.project_key,
                     RiskScore.calculation_date == risk.calculated_at,
+                    RiskScore.period_label == risk.period_label,
                 )
             )
             existing = result.scalar_one_or_none()
@@ -101,6 +102,7 @@ class SnapshotWriter:
             row_data = {
                 "project_key": risk.project_key,
                 "calculation_date": risk.calculated_at,
+                "period_label": risk.period_label,
                 "delivery_risk": risk.delivery.trend_adjusted,
                 "quality_risk": risk.quality.trend_adjusted,
                 "compliance_risk": risk.compliance.trend_adjusted,

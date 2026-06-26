@@ -6,7 +6,7 @@ Star Schema:
   Dims:     DimProject, DimSprint, DimVersion, DimUser, DimComponent
   Audit:    ExtractionRun, KPIResult, RiskScore
 """
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Date,
@@ -57,8 +57,8 @@ class DimProject(Base):
     description = Column(Text)
     url = Column(String(512))
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     issues = relationship("FactIssue", back_populates="project")
     snapshots = relationship("FactSnapshot", back_populates="project")
@@ -73,7 +73,7 @@ class DimUser(Base):
     email = Column(String(255))
     is_active = Column(Boolean, default=True)
     timezone = Column(String(64))
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class DimComponent(Base):
@@ -178,7 +178,7 @@ class FactIssue(Base):
     dq_closed_without_resolution = Column(Boolean, default=False)
 
     # Metadata
-    last_synced_at = Column(DateTime, default=datetime.utcnow)
+    last_synced_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     raw_json = Column(Text)             # Compressed raw payload for audit
 
     project = relationship("DimProject", back_populates="issues")
@@ -296,7 +296,7 @@ class ExtractionRun(Base):
     run_id = Column(String(64), unique=True, nullable=False)
     run_type = Column(String(32))       # full | incremental | snapshot
     triggered_by = Column(String(64))   # scheduler | api | manual
-    started_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime)
     status = Column(SAEnum(RunStatus), default=RunStatus.RUNNING)
     projects_processed = Column(Integer, default=0)
@@ -341,12 +341,14 @@ class KPIResult(Base):
 class RiskScore(Base):
     """
     Risk score per project, calculated as Impact × Probability × Trend.
+    One row per (project, date, period_label).
     """
     __tablename__ = "risk_score"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_key = Column(String(64), ForeignKey("dim_project.id"), index=True)
     calculation_date = Column(Date, index=True)
+    period_label = Column(String(16), default="1m")  # 1w | 1m | 3m
     delivery_risk = Column(Float, default=0.0)
     quality_risk = Column(Float, default=0.0)
     compliance_risk = Column(Float, default=0.0)
@@ -357,6 +359,6 @@ class RiskScore(Base):
     recommended_actions = Column(Text)  # JSON: list of recommendations
 
     __table_args__ = (
-        UniqueConstraint("project_key", "calculation_date",
-                         name="uq_risk_project_date"),
+        UniqueConstraint("project_key", "calculation_date", "period_label",
+                         name="uq_risk_project_date_period"),
     )

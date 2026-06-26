@@ -47,6 +47,7 @@ def make_issue(
     has_component: bool = True,
     has_fix_version: bool = True,
     has_epic: bool = True,
+    labels: list[str] | None = None,
     story_points: float | None = 3.0,
 ) -> IssueRecord:
     today = date.today()
@@ -54,6 +55,8 @@ def make_issue(
     resolved = _utc(today - timedelta(days=resolved_offset)) if resolved_offset is not None else None
     due = today + timedelta(days=due_offset) if due_offset is not None else None
 
+    # Open issues should not have resolution_time_days
+    effective_resolution_days = resolution_days if resolved_offset is not None else None
     return IssueRecord(
         jira_key=key,
         project_key=project,
@@ -71,7 +74,7 @@ def make_issue(
         updated_date=resolved or created,
         due_date=due,
         age_days=age_days,
-        resolution_time_days=resolution_days,
+        resolution_time_days=effective_resolution_days,
         cycle_time_days=cycle_days,
         times_reopened=times_reopened,
         is_overdue=is_overdue,
@@ -84,6 +87,7 @@ def make_issue(
         dq_missing_epic=(not has_epic),
         dq_missing_due_date=(due is None),
         dq_closed_without_resolution=(status_category == "Done" and resolved is None),
+        labels=labels,
         story_points=story_points,
     )
 
@@ -311,6 +315,82 @@ class TestRiskKPIs:
         ]
         kpis = calc(issues, "1m")
         assert kpis["stale_issues_7d"].current_value == 1
+
+    def test_blocked_critical_open_by_status(self):
+        issues = [
+            make_issue("P-1", priority="Critical", status="Blocked",
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=5),
+            make_issue("P-2", priority="Blocker", status="In Progress",
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=5),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["blocked_critical_open"].current_value == 1
+
+    def test_blocked_critical_open_by_label(self):
+        issues = [
+            make_issue("P-1", priority="Critical", status="In Progress",
+                       labels=["blocked"], resolved_offset=None,
+                       status_category="In Progress", created_offset=5),
+            make_issue("P-2", priority="Blocker", status="In Progress",
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=5),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["blocked_critical_open"].current_value == 1
+
+    def test_blocked_critical_open_ignores_non_critical(self):
+        issues = [
+            make_issue("P-1", priority="Medium", status="Blocked",
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=5),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["blocked_critical_open"].current_value == 0
+
+    def test_aging_critical_open(self):
+        issues = [
+            make_issue("P-1", priority="Critical", age_days=20,
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=25),
+            make_issue("P-2", priority="Blocker", age_days=10,
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=15),
+            make_issue("P-3", priority="Highest", age_days=5,
+                       resolved_offset=None, status_category="To Do",
+                       created_offset=10),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["aging_critical_open"].current_value == 1
+
+    def test_sla_at_risk(self):
+        """Issue with age_days > 80% of avg resolution time = at risk."""
+        issues = [
+            # 1 resolved issue with 10d resolution time → avg = 10d
+            make_issue("P-1", priority="Medium", resolved_offset=30,
+                       resolution_days=10.0, created_offset=40),
+            # 1 open issue at 9d old (> 8d = 80% of 10d) → at risk
+            make_issue("P-2", priority="Major", age_days=9,
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=9),
+            # 1 open issue at 5d old (< 8d) → not at risk
+            make_issue("P-3", priority="Major", age_days=5,
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=5),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["sla_at_risk"].current_value == 1
+
+    def test_sla_at_risk_zero_avg_resolution(self):
+        """No resolved issues → avg_resolution is None → sla_at_risk = 0."""
+        issues = [
+            make_issue("P-1", priority="Major", age_days=20,
+                       resolved_offset=None, status_category="In Progress",
+                       created_offset=25),
+        ]
+        kpis = calc(issues, "1m")
+        assert kpis["sla_at_risk"].current_value == 0
 
 
 # ---------------------------------------------------------------------------

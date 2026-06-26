@@ -241,7 +241,7 @@ def _make_issues(project_key: str, count: int, start: date, end: date) -> list[d
             "dq_closed_without_resolution": (status_cat == "Done" and not resolved_dt),
             "epic_key": None,
             "labels": json.dumps([]),
-            "last_synced_at": datetime.utcnow(),
+            "last_synced_at": datetime.now(timezone.utc),
         })
 
     return issues
@@ -322,8 +322,8 @@ async def seed():
             run_id=str(uuid4()),
             run_type="full",
             triggered_by="seed_script",
-            started_at=datetime.utcnow() - timedelta(minutes=5),
-            completed_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            completed_at=datetime.now(timezone.utc),
             status=RunStatus.SUCCESS,
             projects_processed=len(PROJECTS),
             issues_extracted=sum(issue_counts.values()),
