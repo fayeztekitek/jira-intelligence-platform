@@ -10,7 +10,7 @@
 
 | Status | ID | Title | Hours | Dependencies |
 |--------|----|-------|-------|-------------|
-| 🔵 Planned | S6.1 | pgvector setup | 4 | S2.2 |
+| ✅ Done | S6.1 | pgvector setup | 4 | S2.2 |
 | 🔵 Planned | S6.2 | Embedding pipeline | 6 | S6.1 |
 | 🔵 Planned | S6.3 | Agent orchestrator | 10 | S6.4 |
 | 🔵 Planned | S6.4 | Tool registry (8 tools) | 8 | S5.1, S4.1 |

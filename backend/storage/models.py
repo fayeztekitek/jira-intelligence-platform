@@ -57,6 +57,7 @@ class DimProject(Base):
     description = Column(Text)
     url = Column(String(512))
     is_active = Column(Boolean, default=True)
+    embedding = Column(Text, nullable=True)             # pgvector: vector(384) JSON
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -178,6 +179,7 @@ class FactIssue(Base):
     dq_closed_without_resolution = Column(Boolean, default=False)
 
     # Metadata
+    embedding = Column(Text, nullable=True)             # pgvector: vector(384) JSON
     last_synced_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     raw_json = Column(Text)             # Compressed raw payload for audit
 
@@ -331,6 +333,7 @@ class KPIResult(Base):
     formula = Column(Text)
     interpretation = Column(Text)
     recommended_action = Column(Text)
+    embedding = Column(Text, nullable=True)             # pgvector: vector(384) JSON
 
     __table_args__ = (
         UniqueConstraint("project_key", "kpi_name", "calculation_date", "period_label",

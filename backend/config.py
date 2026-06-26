@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     # Features
     enable_nlp_analysis: bool = False
     enable_duplicate_detection: bool = False
+    enable_pgvector: bool = False
 
     def masked_token(self) -> str:
         """Returns masked API token for safe logging."""
