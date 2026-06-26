@@ -759,6 +759,21 @@ async def export_issues_xlsx(
         headers={"Content-Disposition": f"attachment; filename={project_key}_export.xlsx"},
     )
 
+
+@router.get("/export/pdf")
+async def export_pdf_report(
+    user: AuthDep,
+    project_key: str = Query(...),
+):
+    from api.export import build_pdf
+
+    buf = await build_pdf(project_key)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={project_key}_report.pdf"},
+    )
+
 @router.get("/export/csv")
 async def export_issues_csv(
     user: AuthDep,

@@ -156,3 +156,164 @@ async def build_xlsx(
         builder.add_issues_sheet(issues)
 
     return builder.build()
+
+
+# ---------------------------------------------------------------------------
+# PDF Export
+# ---------------------------------------------------------------------------
+
+
+def _risk_classify(score: float | None) -> str:
+    if score is None:
+        return "unknown"
+    if score >= 75:
+        return "critical"
+    if score >= 50:
+        return "high"
+    if score >= 25:
+        return "medium"
+    return "low"
+
+
+async def build_pdf(project_key: str) -> io.BytesIO:
+    """Build an A4 PDF executive report."""
+    import json
+    from pathlib import Path
+    from weasyprint import HTML
+    from sqlalchemy import select, func, desc
+    from storage.database import get_db
+    from storage.models import DimProject, FactIssue, KPIResult, RiskScore
+
+    template_path = Path(__file__).parent / "export_templates" / "report.html"
+    template = template_path.read_text(encoding="utf-8")
+
+    today = date.today()
+
+    async with get_db() as db:
+        proj = await db.get(DimProject, project_key)
+        project_name = proj.name if proj else project_key
+
+        # Latest risk score (1m period)
+        risk_row = (await db.execute(
+            select(RiskScore).where(
+                RiskScore.project_key == project_key,
+                RiskScore.period_label == "1m",
+            ).order_by(RiskScore.calculation_date.desc()).limit(1)
+        )).scalar_one_or_none()
+
+        # Issue counts
+        total_open = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.status_category != "Done",
+            )
+        )).scalar() or 0
+
+        total_overdue = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.is_overdue == True,
+            )
+        )).scalar() or 0
+
+        critical_open = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.status_category != "Done",
+                FactIssue.priority.in_(["Critical", "Blocker", "Highest"]),
+            )
+        )).scalar() or 0
+
+        unassigned_open = (await db.execute(
+            select(func.count(FactIssue.id)).where(
+                FactIssue.project_key == project_key,
+                FactIssue.status_category != "Done",
+                FactIssue.assignee_id == None,
+            )
+        )).scalar() or 0
+
+        # Top KPIs (latest 1m period)
+        kpi_rows_raw = (await db.execute(
+            select(KPIResult).where(
+                KPIResult.project_key == project_key,
+                KPIResult.period_label == "1m",
+            ).order_by(KPIResult.kpi_category, KPIResult.kpi_name)
+        )).scalars().all()
+
+        # Alerts from executive summary logic
+        alerts = _build_pdf_alerts(total_overdue, critical_open, unassigned_open,
+                                   risk_row.composite_risk if risk_row else 0)
+
+    # Risk scores
+    composite = round(risk_row.composite_risk, 1) if risk_row else 0
+    delivery = round(risk_row.delivery_risk, 1) if risk_row else 0
+    quality = round(risk_row.quality_risk, 1) if risk_row else 0
+    compliance = round(risk_row.compliance_risk, 1) if risk_row else 0
+    operational = round(risk_row.operational_risk, 1) if risk_row else 0
+
+    # KPI table rows
+    kpi_rows = ""
+    for k in kpi_rows_raw[:15]:
+        val = round(k.current_value, 1) if k.current_value is not None else "—"
+        trend = k.trend.value if k.trend else "unknown"
+        risk_lvl = k.risk_level.value if k.risk_level else "low"
+        kpi_rows += (
+            f"<tr><td>{k.kpi_name}</td><td>{val}</td>"
+            f"<td class='trend-{trend}'>{trend}</td>"
+            f"<td class='risk-{risk_lvl}'>{risk_lvl}</td></tr>\n"
+        )
+
+    # Alert items
+    alert_items = ""
+    for a in alerts[:8]:
+        level = a.get("level", "medium")
+        msg = a.get("message", "")
+        alert_items += f"<li class='alert-{level}'><strong>{level.upper()}:</strong> {msg}</li>\n"
+    if not alert_items:
+        alert_items = "<li style='color:#666'>No active alerts. Project health is good.</li>"
+
+    html = template.format(
+        project_name=project_name,
+        generated_at=today.isoformat(),
+        overall_risk_level=_risk_classify(composite),
+        composite_score=composite,
+        composite_risk_level=_risk_classify(composite),
+        delivery_score=delivery,
+        delivery_level=_risk_classify(delivery),
+        quality_score=quality,
+        quality_level=_risk_classify(quality),
+        compliance_score=compliance,
+        compliance_level=_risk_classify(compliance),
+        operational_score=operational,
+        operational_level=_risk_classify(operational),
+        total_open=total_open,
+        total_overdue=total_overdue,
+        critical_open=critical_open,
+        unassigned_open=unassigned_open,
+        kpi_rows=kpi_rows,
+        alert_items=alert_items,
+    )
+
+    buf = io.BytesIO()
+    HTML(string=html).write_pdf(buf)
+    buf.seek(0)
+    return buf
+
+
+def _build_pdf_alerts(overdue: int, critical: int, unassigned: int, risk: float) -> list[dict]:
+    alerts = []
+    if critical >= 10:
+        alerts.append({"level": "critical", "message": f"{critical} critical issues open — immediate attention"})
+    elif critical >= 3:
+        alerts.append({"level": "high", "message": f"{critical} critical/blocker issues open"})
+    if overdue >= 20:
+        alerts.append({"level": "high", "message": f"{overdue} overdue issues across all projects"})
+    elif overdue >= 5:
+        alerts.append({"level": "medium", "message": f"{overdue} overdue issues need re-planning"})
+    if unassigned >= 20:
+        alerts.append({"level": "high", "message": f"{unassigned} open issues have no assignee"})
+    if risk >= 75:
+        alerts.append({"level": "critical", "message": "Risk is CRITICAL — escalate to leadership"})
+    elif risk >= 50:
+        alerts.append({"level": "high", "message": "Risk is HIGH — review in next steering committee"})
+    return alerts
