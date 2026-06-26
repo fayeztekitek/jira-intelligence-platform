@@ -19,13 +19,18 @@ from __future__ import annotations
 import csv
 import io
 import json
+import time
+from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any
+
+import structlog
 
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, desc, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +42,8 @@ from storage.models import (
     DimProject, DimVersion, FactIssue, FactTransition,
     KPIResult, RiskScore, ExtractionRun, FactSnapshot,
 )
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -833,3 +840,64 @@ async def export_issues_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={project_key}_issues.csv"},
     )
+
+
+# ---------------------------------------------------------------------------
+# AI Agent
+# ---------------------------------------------------------------------------
+
+from collections import defaultdict
+
+_agent_instance: AgentOrchestrator | None = None
+
+
+def _get_agent() -> AgentOrchestrator:
+    global _agent_instance
+    if _agent_instance is None:
+        from ai_agent.agent import AgentOrchestrator
+        _agent_instance = AgentOrchestrator()
+    return _agent_instance
+
+
+_rate_limits: dict[str, list[float]] = defaultdict(list)
+_RATE_WINDOW = 60
+_RATE_MAX = 20
+
+
+def _check_rate_limit(user_id: str) -> bool:
+    now = time.time()
+    timestamps = _rate_limits[user_id]
+    cutoff = now - _RATE_WINDOW
+    _rate_limits[user_id] = [t for t in timestamps if t > cutoff]
+    if len(_rate_limits[user_id]) >= _RATE_MAX:
+        return False
+    _rate_limits[user_id].append(now)
+    return True
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    project_id: str | None = Field(None, description="Optional project context")
+
+
+@router.post("/ai/ask")
+async def ai_ask(
+    user: AuthDep,
+    body: ChatRequest,
+):
+    if not _check_rate_limit(user.user_id):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded (20 req/min)")
+
+    agent = _get_agent()
+    result = await agent.ask(body.question)
+
+    response = {
+        "answer": result["response"],
+        "tool_used": result["tool_used"],
+        "latency_ms": result["latency_ms"],
+    }
+
+    logger.info("ai_ask", user=user.user_id, question_len=len(body.question),
+                 response_len=len(result["response"]), latency_ms=result["latency_ms"])
+
+    return response

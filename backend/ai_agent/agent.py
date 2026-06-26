@@ -15,6 +15,10 @@ from typing import Any
 
 from config import get_settings
 from ai_agent.tools import list_tools, call_tool
+from ai_agent.prompts import system_prompt, mode_prompt, fallback_prompt
+from ai_agent.guardrails import (
+    strip_pii, is_off_topic, detect_ambiguity, check_permission, enforce_source_citation,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -127,7 +131,7 @@ class AgentOrchestrator:
                 "search_issues": ["issue", "bug", "story", "task", "search", "find"],
                 "get_project_kpis": ["kpi", "delivery", "quality"],
                 "get_risk_scores": ["risk", "score"],
-                "get_recommendations": ["recommend", "action"],
+                "get_recommendations": ["recommend", "action", "should", "suggest"],
             }
             keywords = keyword_map.get(tool_name, [])
             if any(k in q for k in keywords):
@@ -142,6 +146,44 @@ class AgentOrchestrator:
                            tool_name: str | None, result: Any) -> str:
         if isinstance(result, dict) and "error" in result:
             return f"I encountered an error: {result['error']}"
+
+        # Use LLM if configured, else fallback to built-in formatters
+        if settings.llm_api_key:
+            return self._llm_generate(question, intent, tool_name, result)
+
+        return self._format_response(tool_name, result)
+
+    def _llm_generate(self, question: str, intent: str,
+                      tool_name: str | None, result: Any) -> str:
+        mode = "executive" if intent in ("executive", "comparison") else \
+               "technical" if intent in ("technical", "historical") else \
+               "operational"
+        source_label = f"{tool_name} for {result.get('project_key', '?')}" if tool_name else "data"
+        result_str = json.dumps(result, indent=2, default=str) if result else "No data returned."
+
+        messages = [
+            {"role": "system", "content": system_prompt()},
+            {"role": "user", "content": mode_prompt(mode, question, result_str, source_label=source_label)},
+        ]
+
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=settings.llm_api_key)
+            resp = client.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                max_tokens=settings.llm_max_tokens,
+                temperature=settings.llm_temperature,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            logger.warning("llm_failed", error=str(e))
+            return self._format_response(tool_name, result)
+
+    @staticmethod
+    def _format_response(tool_name: str | None, result: Any) -> str:
+        if not result:
+            return "I don't have enough data to answer that."
 
         if tool_name == "get_exec_summary":
             projs = result.get("projects", [])
@@ -222,17 +264,54 @@ class AgentOrchestrator:
                 lines.append(f"- {r}")
             return "\n".join(lines)
 
-        return json.dumps(result, indent=2)
+        source_label = f"{tool_name} for {result.get('project_key', '?')}" if tool_name else "data"
+        return (f"[Source: {source_label}]\n" + json.dumps(result, indent=2, default=str))
 
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
-    async def ask(self, question: str) -> dict:
+    async def ask(self, question: str, allowed_projects: list[str] | None = None) -> dict:
         start = time.monotonic()
+
+        # Guard 1: content safety
+        if is_off_topic(question):
+            return {
+                "response": "I'm a Jira analytics assistant and can only answer questions about project data, KPIs, risks, and sprints.",
+                "intent": "rejected",
+                "tool_used": None,
+                "latency_ms": 0,
+                "context_remaining": settings.agent_context_size - len(self.history),
+            }
+
         intent = self._classify_intent(question)
+
+        # Guard 2: ambiguity detection
+        ambiguous = detect_ambiguity(question, intent)
+        if ambiguous:
+            response = ambiguity_prompt(ambiguous)
+            latency = round((time.monotonic() - start) * 1000, 1)
+            return {
+                "response": response,
+                "intent": intent,
+                "tool_used": None,
+                "latency_ms": latency,
+                "context_remaining": settings.agent_context_size - len(self.history),
+            }
+
         tool_name = self._select_tool(intent, question)
         params = self._extract_parameters(intent, question)
+
+        # Guard 3: permission check
+        proj = params.get("project_key") or params.get("project_keys", "").split(",")[0]
+        if proj and allowed_projects is not None and not check_permission(proj, allowed_projects):
+            return {
+                "response": f"I'm sorry, you don't have access to project **{proj}**.",
+                "intent": intent,
+                "tool_used": None,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "context_remaining": settings.agent_context_size - len(self.history),
+            }
 
         logger.info("agent_dispatch", intent=intent, tool=tool_name, params=params)
 
@@ -241,6 +320,14 @@ class AgentOrchestrator:
             result = await call_tool(tool_name, **params)
 
         response = self._generate_response(question, intent, tool_name, result)
+
+        # Guard 4: source citation enforcement
+        default_source = f"{tool_name} for {proj}" if tool_name and proj else "data"
+        response = enforce_source_citation(response, default_source)
+
+        # Guard 5: PII redaction
+        response = strip_pii(response)
+
         latency = round((time.monotonic() - start) * 1000, 1)
 
         turn = ConversationTurn(
