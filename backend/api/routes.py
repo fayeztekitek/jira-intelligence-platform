@@ -741,39 +741,53 @@ async def export_issues_csv(
     project_key: str = Query(...),
     issue_type: str | None = Query(None),
     status: str | None = Query(None),
+    max_rows: int = Query(10000, description="Maximum rows to export", le=100000),
 ):
-    async with get_db() as db:
-        q = select(FactIssue).where(FactIssue.project_key == project_key)
-        if issue_type:
-            q = q.where(FactIssue.issue_type == issue_type)
-        if status:
-            q = q.where(FactIssue.status == status)
-        rows = (await db.execute(q)).scalars().all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
+    HEADERS = [
         "Key", "Summary", "Type", "Status", "Priority", "Assignee",
         "Created", "Resolved", "Age (days)", "Resolution Time (days)",
         "Overdue", "Times Reopened", "Missing Assignee", "Missing Priority",
-    ])
-    for r in rows:
-        writer.writerow([
-            r.jira_key, r.summary, r.issue_type, r.status, r.priority,
-            r.assignee_id or "",
-            r.created_date.isoformat() if r.created_date else "",
-            r.resolved_date.isoformat() if r.resolved_date else "",
-            r.age_days or "",
-            r.resolution_time_days or "",
-            "Yes" if r.is_overdue else "No",
-            r.times_reopened or 0,
-            "Yes" if r.dq_missing_assignee else "No",
-            "Yes" if r.dq_missing_priority else "No",
-        ])
+    ]
 
-    output.seek(0)
+    async def row_stream():
+        hdr = io.StringIO()
+        csv.writer(hdr).writerow(HEADERS)
+        yield hdr.getvalue()
+        offset = 0
+        batch = 500
+        total_yielded = 0
+        while total_yielded < max_rows:
+            async with get_db() as db:
+                q = select(FactIssue).where(FactIssue.project_key == project_key)
+                if issue_type:
+                    q = q.where(FactIssue.issue_type == issue_type)
+                if status:
+                    q = q.where(FactIssue.status == status)
+                q = q.order_by(FactIssue.jira_key).limit(batch).offset(offset)
+                rows = (await db.execute(q)).scalars().all()
+            if not rows:
+                break
+            chunk = io.StringIO()
+            w = csv.writer(chunk)
+            for r in rows:
+                w.writerow([
+                    r.jira_key, r.summary, r.issue_type, r.status, r.priority,
+                    r.assignee_id or "",
+                    r.created_date.isoformat() if r.created_date else "",
+                    r.resolved_date.isoformat() if r.resolved_date else "",
+                    r.age_days or "",
+                    r.resolution_time_days or "",
+                    "Yes" if r.is_overdue else "No",
+                    r.times_reopened or 0,
+                    "Yes" if r.dq_missing_assignee else "No",
+                    "Yes" if r.dq_missing_priority else "No",
+                ])
+            yield chunk.getvalue()
+            offset += batch
+            total_yielded += len(rows)
+
     return StreamingResponse(
-        iter([output.getvalue()]),
+        row_stream(),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={project_key}_issues.csv"},
     )
