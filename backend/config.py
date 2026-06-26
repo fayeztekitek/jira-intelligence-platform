@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     # Features
     enable_nlp_analysis: bool = False
     enable_duplicate_detection: bool = False
+    enable_pgvector: bool = False
+    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_batch_size: int = 32
+
+    # AI Agent
+    llm_provider: str = "openai"
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o-mini"
+    llm_max_tokens: int = 1024
+    llm_temperature: float = 0.3
+    agent_context_size: int = 10
 
     def masked_token(self) -> str:
         """Returns masked API token for safe logging."""

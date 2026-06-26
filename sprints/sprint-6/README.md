@@ -4,20 +4,20 @@
 
 **Cadence**: 1 week (Mon–Fri)
 
-**Total Points**: 46 (0 completed, 8 pending)
+**Total Points**: 46 (46 completed, 0 pending)
 
 ## Stories
 
 | Status | ID | Title | Hours | Dependencies |
 |--------|----|-------|-------|-------------|
-| 🔵 Planned | S6.1 | pgvector setup | 4 | S2.2 |
-| 🔵 Planned | S6.2 | Embedding pipeline | 6 | S6.1 |
-| 🔵 Planned | S6.3 | Agent orchestrator | 10 | S6.4 |
-| 🔵 Planned | S6.4 | Tool registry (8 tools) | 8 | S5.1, S4.1 |
-| 🔵 Planned | S6.5 | Prompt templates | 4 | S6.3 |
-| 🔵 Planned | S6.6 | Guardrails | 5 | S6.3 |
-| 🔵 Planned | S6.7 | AI chat API endpoint | 3 | S6.3 |
-| 🔵 Planned | S6.8 | AI agent unit tests | 6 | S6.3–S6.6 |
+| ✅ Done | S6.1 | pgvector setup | 4 | S2.2 |
+| ✅ Done | S6.2 | Embedding pipeline | 6 | S6.1 |
+| ✅ Done | S6.3 | Agent orchestrator | 10 | S6.4 |
+| ✅ Done | S6.4 | Tool registry (8 tools) | 8 | S5.1, S4.1 |
+| ✅ Done | S6.5 | Prompt templates | 4 | S6.3 |
+| ✅ Done | S6.6 | Guardrails | 5 | S6.3 |
+| ✅ Done | S6.7 | AI chat API endpoint | 3 | S6.3 |
+| ✅ Done | S6.8 | AI agent unit tests | 6 | S6.3–S6.6 |
 
 ## Definition of Done
 

@@ -205,6 +205,14 @@ async def job_backfill_snapshots(days: int = 90) -> int:
     return total_written
 
 
+async def job_embedding_pipeline() -> None:
+    """Incremental embedding for un-embedded records."""
+    from ai_agent.rag_index import EmbeddingPipeline
+    logger.info("job_start", job="embedding_pipeline")
+    counts = await EmbeddingPipeline.run_incremental()
+    logger.info("job_done", job="embedding_pipeline", counts=counts)
+
+
 async def job_snapshot_maintenance() -> None:
     """Purge snapshots older than retention period."""
     from ingestion.snapshot_writer import SnapshotWriter
@@ -299,6 +307,16 @@ def create_scheduler() -> AsyncIOScheduler:
         name="Weekly full Jira sync",
         replace_existing=True,
         misfire_grace_time=7200,
+    )
+
+    # Embedding pipeline at 03:30 UTC (after KPI calculation)
+    scheduler.add_job(
+        job_embedding_pipeline,
+        CronTrigger(hour=3, minute=30),
+        id="embedding_pipeline",
+        name="Daily embedding generation",
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     # Maintenance Friday at 04:00 UTC
