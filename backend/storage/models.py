@@ -10,7 +10,7 @@ from datetime import datetime, date, timezone
 from typing import Optional
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Date,
-    Text, ForeignKey, Index, UniqueConstraint, Enum as SAEnum
+    Text, ForeignKey, Index, UniqueConstraint, Enum as SAEnum, func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 import enum
@@ -365,3 +365,20 @@ class RiskScore(Base):
         UniqueConstraint("project_key", "calculation_date", "period_label",
                          name="uq_risk_project_date_period"),
     )
+
+
+class AiUsage(Base):
+    """Token usage tracking for AI agent calls."""
+    __tablename__ = "ai_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(128), index=True)
+    question = Column(Text)
+    response = Column(Text)
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    cost_estimate = Column(Float, default=0.0)
+    tool_used = Column(String(64), nullable=True)
+    latency_ms = Column(Float, default=0.0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

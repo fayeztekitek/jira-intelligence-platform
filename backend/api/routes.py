@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import time
 from collections import defaultdict
 from datetime import date, timedelta
@@ -861,18 +862,24 @@ def _get_agent() -> AgentOrchestrator:
 
 _rate_limits: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60
-_RATE_MAX = 20
+_RATE_MAX = int(os.getenv("AI_RATE_LIMIT", "20"))
+_BURST_MAX = _RATE_MAX + 5
 
 
-def _check_rate_limit(user_id: str) -> bool:
+def _check_rate_limit(user_id: str) -> tuple[bool, int]:
+    """Token bucket rate limiter. Returns (allowed, retry_after_seconds)."""
     now = time.time()
     timestamps = _rate_limits[user_id]
     cutoff = now - _RATE_WINDOW
-    _rate_limits[user_id] = [t for t in timestamps if t > cutoff]
-    if len(_rate_limits[user_id]) >= _RATE_MAX:
-        return False
-    _rate_limits[user_id].append(now)
-    return True
+    active = [t for t in timestamps if t > cutoff]
+
+    # Allow bursts up to BURST_MAX
+    if len(active) < _BURST_MAX:
+        _rate_limits[user_id] = active + [now]
+        return True, 0
+
+    retry_after = int(_RATE_WINDOW - (now - active[0])) + 1
+    return False, max(retry_after, 1)
 
 
 class ChatRequest(BaseModel):
@@ -880,24 +887,123 @@ class ChatRequest(BaseModel):
     project_id: str | None = Field(None, description="Optional project context")
 
 
+class SuggestRequest(BaseModel):
+    context: dict | None = Field(None, description="Optional context: {project, recent_intent}")
+
+
 @router.post("/ai/ask")
 async def ai_ask(
     user: AuthDep,
     body: ChatRequest,
 ):
-    if not _check_rate_limit(user.user_id):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded (20 req/min)")
+    allowed, retry_after = _check_rate_limit(user.user_id)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded (20 req/min)",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     agent = _get_agent()
     result = await agent.ask(body.question)
 
-    response = {
+    response_data = {
         "answer": result["response"],
         "tool_used": result["tool_used"],
         "latency_ms": result["latency_ms"],
     }
 
+    # Track token usage in AiUsage table
+    try:
+        from storage.models import AiUsage
+        from storage.database import get_db
+
+        tokens = sum(len(w) for w in result.get("response", "").split())
+        cost_per_1k = 0.01
+        cost_est = round(tokens * cost_per_1k / 1000, 6)
+
+        async with get_db() as db:
+            usage = AiUsage(
+                user_id=user.user_id,
+                question=body.question[:500],
+                response=result["response"][:500],
+                prompt_tokens=len(body.question.split()) * 2,
+                completion_tokens=tokens,
+                total_tokens=tokens + len(body.question.split()) * 2,
+                cost_estimate=cost_est,
+                tool_used=result.get("tool_used"),
+                latency_ms=result.get("latency_ms"),
+            )
+            db.add(usage)
+            await db.commit()
+    except Exception as e:
+        logger.warning("ai_usage_log_failed", error=str(e))
+
     logger.info("ai_ask", user=user.user_id, question_len=len(body.question),
                  response_len=len(result["response"]), latency_ms=result["latency_ms"])
 
-    return response
+    return response_data
+
+
+@router.post("/ai/suggest")
+async def ai_suggest(
+    user: AuthDep,
+    body: SuggestRequest,
+):
+    agent = _get_agent()
+    suggestions = agent.suggest_questions(body.context)
+    return {"suggestions": suggestions}
+
+
+@router.get("/ai/recommendations")
+async def ai_recommendations(
+    user: AuthDep,
+    project_id: str = Query(..., min_length=2, max_length=10),
+):
+    from ai_agent.tools import generate_recommendations
+    result = await generate_recommendations(project_id.upper())
+
+    logger.info("ai_recommendations", user=user.user_id, project=project_id,
+                 total=result.get("total", 0))
+
+    return result
+
+
+@router.get("/ai/usage")
+async def ai_usage(
+    user: AuthDep,
+):
+    from storage.models import AiUsage
+    from storage.database import get_db
+    from sqlalchemy import select, func
+
+    async with get_db() as db:
+        stmt = select(AiUsage).where(
+            AiUsage.user_id == user.user_id,
+        ).order_by(AiUsage.created_at.desc()).limit(100)
+        rows = (await db.execute(stmt)).scalars().all()
+
+        total_stmt = select(
+            func.sum(AiUsage.total_tokens),
+            func.sum(AiUsage.cost_estimate),
+            func.count(AiUsage.id),
+        ).where(AiUsage.user_id == user.user_id)
+        totals = (await db.execute(total_stmt)).one()
+
+    return {
+        "user_id": user.user_id,
+        "total_calls": totals[2] or 0,
+        "total_tokens": totals[0] or 0,
+        "total_cost": round(totals[1] or 0, 6),
+        "recent": [
+            {
+                "question": r.question[:100],
+                "total_tokens": r.total_tokens,
+                "cost_estimate": r.cost_estimate,
+                "tool_used": r.tool_used,
+                "latency_ms": r.latency_ms,
+                "created_at": str(r.created_at),
+            }
+            for r in rows[:20]
+        ],
+    }

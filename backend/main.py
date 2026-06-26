@@ -113,6 +113,22 @@ if os.path.isdir(frontend_path):
     async def serve_frontend():
         return FileResponse(os.path.join(frontend_path, "index.html"))
 
+    # Serve AI chat React app at /ai/
+    ai_chat_dist = os.path.join(frontend_path, "ai-chat", "dist")
+    if os.path.isdir(ai_chat_dist):
+        app.mount("/ai/assets", StaticFiles(directory=os.path.join(ai_chat_dist, "assets")), name="ai_assets")
+
+        @app.get("/ai/{full_path:path}", response_class=FileResponse)
+        async def serve_ai_chat(full_path: str):
+            file_path = os.path.join(ai_chat_dist, full_path)
+            if os.path.isfile(file_path):
+                return FileResponse(file_path)
+            return FileResponse(os.path.join(ai_chat_dist, "index.html"))
+
+        @app.get("/ai", response_class=FileResponse)
+        async def serve_ai_chat_root():
+            return FileResponse(os.path.join(ai_chat_dist, "index.html"))
+
 
 if __name__ == "__main__":
     import uvicorn
