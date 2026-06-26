@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     enable_nlp_analysis: bool = False
     enable_duplicate_detection: bool = False
     enable_pgvector: bool = False
+    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_batch_size: int = 32
 
     def masked_token(self) -> str:
         """Returns masked API token for safe logging."""
