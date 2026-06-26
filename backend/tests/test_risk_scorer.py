@@ -205,3 +205,12 @@ class TestRiskScorer:
         r2 = RiskScorer(kpis, weights=w_delivery).score()
         # With many critical bugs, quality-heavy weighting should differ
         assert r1.composite_score != r2.composite_score
+
+    def test_risk_trend_result_has_period_label(self):
+        """RiskScoreResult should carry period_label."""
+        issues = [make_issue("P-1")]
+        kpis = KPICalculator("PROJ", issues).calculate_all()
+        risk = RiskScorer(kpis, reference_period="1w").score()
+        assert risk.period_label == "1w"
+        risk2 = RiskScorer(kpis, reference_period="3m").score()
+        assert risk2.period_label == "3m"

@@ -397,6 +397,41 @@ async def get_project_snapshots(
     }
 
 
+@router.get("/projects/{project_key}/risk/history")
+async def get_project_risk_history(
+    user: AuthDep,
+    project_key: str,
+    days: int = Query(90, description="Days of history"),
+    period: str = Query("1m", description="Period: 1w|1m|3m"),
+):
+    since = date.today() - timedelta(days=days)
+    async with get_db() as db:
+        rows = (await db.execute(
+            select(RiskScore).where(
+                RiskScore.project_key == project_key,
+                RiskScore.calculation_date >= since,
+                RiskScore.period_label == period,
+            ).order_by(RiskScore.calculation_date.asc())
+        )).scalars().all()
+
+    return {
+        "project_key": project_key,
+        "period": period,
+        "history": [
+            {
+                "date": r.calculation_date.isoformat(),
+                "composite_risk": r.composite_risk,
+                "risk_level": r.risk_level.value if r.risk_level else "low",
+                "delivery": r.delivery_risk,
+                "quality": r.quality_risk,
+                "compliance": r.compliance_risk,
+                "operational": r.operational_risk,
+            }
+            for r in rows
+        ],
+    }
+
+
 # Risk
 # ---------------------------------------------------------------------------
 
