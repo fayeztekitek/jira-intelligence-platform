@@ -127,8 +127,11 @@ class SnapshotWriter:
         period_type: str,
         kpis: ProjectKPIs,
         risk: RiskScoreResult | None = None,
+        sprint_velocity: float | None = None,
+        sprint_predictability: float | None = None,
+        spillover_rate: float | None = None,
     ) -> None:
-        """Write aggregate FactSnapshot row."""
+        """Write aggregate FactSnapshot row with optional sprint KPIs."""
 
         def get_val(name: str, period: str = "1m") -> float | None:
             kv = kpis.by_name(name, period)
@@ -175,6 +178,9 @@ class SnapshotWriter:
                 "dq_score": get_val("dq_score", p) or 100.0,
                 "risk_score": risk.composite_score if risk else 0.0,
                 "risk_level": _RISK_LEVEL_MAP.get(risk.risk_level, RiskLevel.LOW) if risk else RiskLevel.LOW,
+                "sprint_velocity": sprint_velocity,
+                "sprint_predictability": sprint_predictability,
+                "spillover_rate": spillover_rate,
             }
 
             if existing:

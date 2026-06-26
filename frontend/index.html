@@ -206,6 +206,16 @@ tr:hover td { background: rgba(255,255,255,0.02); }
     <div class="nav-item" onclick="showPage('issues')">
       <span class="nav-icon">📝</span> Issues
     </div>
+    <div class="nav-section">Sprint & Release</div>
+    <div class="nav-item" onclick="showPage('sprints')">
+      <span class="nav-icon">🏃</span> Sprints
+    </div>
+    <div class="nav-item" onclick="showPage('releases')">
+      <span class="nav-icon">🏷️</span> Releases
+    </div>
+    <div class="nav-item" onclick="showPage('trends')">
+      <span class="nav-icon">📈</span> Trends
+    </div>
     <div class="nav-item" onclick="showPage('audit')">
       <span class="nav-icon">🔍</span> Audit Log
     </div>
@@ -292,6 +302,55 @@ tr:hover td { background: rgba(255,255,255,0.02); }
       <div class="period-tabs" id="team-periods"></div>
       <div class="kpi-grid" id="team-kpis"></div>
       <div class="chart-grid" id="team-charts"></div>
+    </div>
+
+    <!-- ── SPRINTS PAGE ── -->
+    <div class="page" id="page-sprints">
+      <div class="kpi-grid" id="sprint-velocity-summary"></div>
+      <div class="chart-card" style="margin-bottom:16px">
+        <div class="chart-title">Sprint Velocity Trend</div>
+        <div class="chart-sub">Last 10 sprints · committed vs completed</div>
+        <div id="chart-sprint-velocity" class="chart-body-lg"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Sprint Predictability</div>
+        <div class="chart-sub">Completed / Committed with 3-sprint rolling average</div>
+        <div id="chart-sprint-predictability" class="chart-body-lg"></div>
+      </div>
+      <div class="table-card">
+        <div class="table-header"><h3>Sprint Details</h3></div>
+        <table>
+          <thead><tr><th>Sprint</th><th>State</th><th>Committed</th><th>Completed</th><th>Carry-over</th><th>Scope Added</th><th>Scope Removed</th><th>Predictability</th></tr></thead>
+          <tbody id="sprint-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── RELEASES PAGE ── -->
+    <div class="page" id="page-releases">
+      <div class="kpi-grid" id="release-summary"></div>
+      <div class="chart-card" style="margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+          <div class="chart-title" style="margin-bottom:0">Version Burndown</div>
+          <select id="version-select" onchange="loadVersionBurndown()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px;min-width:200px">
+            <option value="">— Select a version —</option>
+          </select>
+        </div>
+        <div id="chart-version-burndown" class="chart-body-lg"></div>
+      </div>
+      <div class="table-card">
+        <div class="table-header"><h3>Version Release Progress</h3></div>
+        <table>
+          <thead><tr><th>Version</th><th>Release Date</th><th>Status</th><th>Total</th><th>Resolved</th><th>Unresolved</th><th>Completion</th><th>Delayed</th><th>Readiness</th><th>Progress</th></tr></thead>
+          <tbody id="release-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── TRENDS PAGE ── -->
+    <div class="page" id="page-trends">
+      <div class="period-tabs" id="trend-family-tabs"></div>
+      <div class="chart-grid" id="trend-charts"></div>
     </div>
 
     <!-- ── ISSUES PAGE ── -->
@@ -468,6 +527,8 @@ function showPage(name) {
     executive: 'Executive Summary', delivery: 'Delivery Performance',
     quality: 'Quality & Regression', risk: 'Risk & Control',
     dataquality: 'Data Quality', team: 'Team & Ownership',
+    sprints: 'Sprint Analytics', releases: 'Release Progress',
+    trends: 'KPI Trend Dashboards',
     issues: 'Issue Explorer', audit: 'Audit Log'
   };
   document.getElementById('pageTitle').textContent = titles[name] || name;
@@ -541,6 +602,9 @@ function loadPage(name) {
     case 'risk':       return loadRisk();
     case 'dataquality':return loadDataQuality();
     case 'team':       return loadTeam();
+    case 'sprints':    return loadSprints();
+    case 'releases':   return loadReleases();
+    case 'trends':     return loadTrends();
     case 'issues':     return loadIssues(true);
     case 'audit':      return loadAudit();
   }
@@ -1202,6 +1266,293 @@ async function loadAudit() {
       <td>${r.jira_api_calls || 0}</td>
     </tr>
   `).join('');
+}
+
+// ─── Sprints (S4.6) ───────────────────────────────────────────────────────────
+async function loadSprints() {
+  const proj = currentProject || 'CORE';
+  showSectionLoading('sprint-velocity-summary');
+  let sprints;
+  try {
+    sprints = await api(`/api/projects/${proj}/sprints`);
+  } catch(e) {
+    showSectionError('sprint-velocity-summary', 'Failed to load sprint data', () => loadSprints());
+    return;
+  }
+  if (!sprints.length) {
+    document.getElementById('sprint-velocity-summary').innerHTML = '<div class="kpi-card" style="grid-column:1/-1"><div class="kpi-value">No sprint data available</div></div>';
+    return;
+  }
+
+  const last10 = sprints.slice(0, 10).reverse();
+  const names = last10.map(s => s.sprint_name || `S${s.sprint_id}`);
+  const committed = last10.map(s => s.total_committed);
+  const completed = last10.map(s => s.total_completed);
+  const predict = last10.map(s => s.predictability != null ? +(s.predictability * 100).toFixed(1) : null);
+  const carry = last10.map(s => s.carry_over);
+
+  // Summary cards
+  const total = sprints.reduce((a, s) => ({c: a.c + s.total_committed, p: a.p + s.total_completed, co: a.co + s.carry_over}), {c:0, p:0, co:0});
+  document.getElementById('sprint-velocity-summary').innerHTML = `
+    <div class="kpi-card"><div class="kpi-label">Total Committed</div><div class="kpi-value">${total.c.toFixed(0)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Total Completed</div><div class="kpi-value">${total.p.toFixed(0)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Total Carry-over</div><div class="kpi-value">${total.co.toFixed(0)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Avg Predictability</div><div class="kpi-value">${(sprints.filter(s=>s.predictability).reduce((a,s)=>a+s.predictability,0)/Math.max(sprints.filter(s=>s.predictability).length,1)*100).toFixed(0)}%</div></div>
+  `;
+
+  // Velocity bar chart
+  setTimeout(() => {
+    const el = document.getElementById('chart-sprint-velocity');
+    if (!el) return;
+    const chart = echarts.init(el);
+    chart.setOption({
+      backgroundColor:'transparent',
+      tooltip:{trigger:'axis', axisPointer:{type:'shadow'}},
+      legend:{bottom:0, textStyle:{color:'#8892a4',fontSize:11}},
+      grid:{left:'50px',right:'20px',bottom:'50px',top:'10px'},
+      xAxis:{type:'category',data:names,axisLabel:{color:'#8892a4',fontSize:11,rotate:30},axisLine:{lineStyle:{color:'#2e3248'}}},
+      yAxis:{type:'value',splitLine:{lineStyle:{color:'#1e2235'}},axisLabel:{color:'#8892a4',fontSize:11}},
+      series:[
+        {name:'Committed',type:'bar',barGap:'10%',data:committed,itemStyle:{color:'#4a5568',borderRadius:[3,3,0,0]}},
+        {name:'Completed',type:'bar',data:completed,itemStyle:{color:'#22c55e',borderRadius:[3,3,0,0]}},
+        {name:'Carry-over',type:'bar',data:carry,itemStyle:{color:'#f59e0b',borderRadius:[3,3,0,0]}},
+      ],
+    });
+  }, 50);
+
+  // Predictability line chart
+  setTimeout(() => {
+    const el2 = document.getElementById('chart-sprint-predictability');
+    if (!el2) return;
+    const chart2 = echarts.init(el2);
+    const valid = predict.filter(p => p != null);
+    const rolling = predict.map((p,i) => {
+      if (p == null) return null;
+      const slice = predict.slice(Math.max(0,i-2), i+1).filter(x => x != null);
+      return slice.length ? +(slice.reduce((a,b)=>a+b,0)/slice.length).toFixed(1) : null;
+    });
+    chart2.setOption({
+      backgroundColor:'transparent',
+      tooltip:{trigger:'axis'},
+      legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+      grid:{left:'50px',right:'20px',bottom:'50px',top:'10px'},
+      xAxis:{type:'category',data:names,axisLabel:{color:'#8892a4',fontSize:11,rotate:30},axisLine:{lineStyle:{color:'#2e3248'}}},
+      yAxis:{type:'value',min:0,max:100,name:'%',axisLabel:{color:'#8892a4',fontSize:11},splitLine:{lineStyle:{color:'#1e2235'}}},
+      series:[
+        {name:'Predictability %',type:'line',data:predict,smooth:true,lineStyle:{color:'#8b5cf6',width:2},itemStyle:{color:'#8b5cf6'},connectNulls:false},
+        {name:'3-Sprint Rolling Avg',type:'line',data:rolling,smooth:true,lineStyle:{color:'#f59e0b',width:2,type:'dashed'},itemStyle:{color:'#f59e0b'},connectNulls:false},
+      ],
+    });
+  }, 50);
+
+  // Sprint table
+  document.getElementById('sprint-table').innerHTML = sprints.map(s => {
+    const pct = s.predictability != null ? (s.predictability * 100).toFixed(0) + '%' : '—';
+    const pctColor = s.predictability >= 0.8 ? 'var(--green)' : s.predictability >= 0.5 ? 'var(--amber)' : 'var(--red)';
+    return `<tr>
+      <td><strong>${s.sprint_name}</strong></td>
+      <td><span class="badge badge-${s.state==='closed'?'low':s.state==='active'?'medium':'high'}">${s.state}</span></td>
+      <td>${s.total_committed}</td><td>${s.total_completed}</td>
+      <td>${s.carry_over}</td><td>${s.scope_added}</td><td>${s.scope_removed}</td>
+      <td><strong style="color:${pctColor}">${pct}</strong></td>
+    </tr>`;
+  }).join('');
+}
+
+// ─── Releases (S4.5) ──────────────────────────────────────────────────────────
+async function loadReleases() {
+  const proj = currentProject || 'CORE';
+  showSectionLoading('release-summary');
+  let releases;
+  try {
+    releases = await api(`/api/projects/${proj}/releases`);
+  } catch(e) {
+    showSectionError('release-summary', 'Failed to load release data', () => loadReleases());
+    return;
+  }
+  if (!releases.length) {
+    document.getElementById('release-summary').innerHTML = '<div class="kpi-card" style="grid-column:1/-1"><div class="kpi-value">No release data available</div></div>';
+    document.getElementById('release-table').innerHTML = '';
+    return;
+  }
+
+  // Summary cards
+  const total = releases.length;
+  const released = releases.filter(r => r.is_released).length;
+  const delayed = releases.filter(r => r.is_overdue).length;
+  document.getElementById('release-summary').innerHTML = `
+    <div class="kpi-card"><div class="kpi-label">Total Versions</div><div class="kpi-value">${total}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Released</div><div class="kpi-value">${released}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Delayed</div><div class="kpi-value" style="color:${delayed?'var(--red)':'var(--green)'}">${delayed}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Avg Readiness</div><div class="kpi-value">${(releases.filter(r=>r.readiness_score!=null).reduce((a,r)=>a+r.readiness_score,0)/Math.max(releases.filter(r=>r.readiness_score!=null).length,1)).toFixed(0)}%</div></div>
+  `;
+
+  // Populate version selector for burndown chart
+  const sel = document.getElementById('version-select');
+  sel.innerHTML = '<option value="">— Select a version —</option>' + releases.map(r =>
+    `<option value="${r.version_id}">${r.version_name}${r.is_released?' (released)':r.is_overdue?' (overdue)':''}</option>`
+  ).join('');
+  sel.selectedIndex = 0;
+
+  // Version table with progress bars
+  document.getElementById('release-table').innerHTML = releases.map(r => {
+    const pct = r.completion_pct != null ? r.completion_pct : 0;
+    const barColor = pct >= 80 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
+    const status = r.is_overdue ? '⚠️ Overdue' : r.is_released ? '✓ Released' : '○ Planned';
+    const delayIcon = r.is_overdue ? '🔴' : r.delayed_issues > 0 ? '🟡' : '🟢';
+    return `<tr>
+      <td><strong>${r.version_name}</strong></td>
+      <td style="font-size:12px;color:var(--muted)">${r.release_date || '—'}</td>
+      <td>${status}</td>
+      <td>${r.total_issues}</td>
+      <td>${r.resolved_issues}</td>
+      <td>${r.unresolved_issues}</td>
+      <td><strong>${r.completion_pct != null ? pct.toFixed(0) + '%' : '—'}</strong></td>
+      <td>${delayIcon} ${r.delayed_issues}</td>
+      <td><strong style="color:${r.readiness_score>=80?'var(--green)':r.readiness_score>=50?'var(--amber)':'var(--red)'}">${r.readiness_score != null ? r.readiness_score.toFixed(0) + '%' : '—'}</strong></td>
+      <td style="min-width:120px">
+        <div style="background:var(--surface2);border-radius:4px;height:8px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.5s"></div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadVersionBurndown() {
+  const vid = document.getElementById('version-select').value;
+  const chartEl = document.getElementById('chart-version-burndown');
+  if (!chartEl) return;
+  if (!vid) { chartEl.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">Select a version above to view burndown</div>'; return; }
+
+  chartEl.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">Loading…</div>';
+  try {
+    const data = await api(`/api/versions/${vid}/burndown`);
+    const series = data.burndown || [];
+    if (!series.length) {
+      chartEl.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">No burndown data for this version</div>';
+      return;
+    }
+    const labels = series.map(d => d.date.slice(5));
+    const open = series.map(d => d.open);
+    const resolved = series.map(d => d.resolved);
+    const chart = echarts.init(chartEl);
+    chart.setOption({
+      backgroundColor:'transparent',
+      tooltip:{trigger:'axis'},
+      legend:{bottom:0,textStyle:{color:'#8892a4',fontSize:11}},
+      grid:{left:'50px',right:'20px',bottom:'50px',top:'10px'},
+      xAxis:{type:'category',data:labels,axisLabel:{color:'#8892a4',fontSize:11,rotate:45},axisLine:{lineStyle:{color:'#2e3248'}}},
+      yAxis:{type:'value',min:0,axisLabel:{color:'#8892a4',fontSize:11},splitLine:{lineStyle:{color:'#1e2235'}}},
+      series:[
+        {name:'Open',type:'line',data:open,smooth:true,lineStyle:{color:'#f59e0b',width:2},itemStyle:{color:'#f59e0b'},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'#f59e0b33'},{offset:1,color:'#f59e0b00'}]}}},
+        {name:'Resolved',type:'line',data:resolved,smooth:true,lineStyle:{color:'#22c55e',width:2},itemStyle:{color:'#22c55e'},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'#22c55e33'},{offset:1,color:'#22c55e00'}]}}},
+      ],
+    });
+  } catch(e) {
+    chartEl.innerHTML = '<div style="color:var(--red);text-align:center;padding:40px">Failed to load burndown data</div>';
+  }
+}
+
+// ─── Trends (S4.7) ────────────────────────────────────────────────────────────
+const TREND_FAMILIES = {
+  delivery: {
+    label: 'Delivery',
+    kpis: ['issues_created', 'issues_resolved', 'resolution_rate', 'avg_resolution_days'],
+    labels: { issues_created:'Created', issues_resolved:'Resolved', resolution_rate:'Resolution Rate %', avg_resolution_days:'Avg Resolution Days' },
+    units: { resolution_rate:'%', avg_resolution_days:'d' },
+    colors: ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6'],
+  },
+  sprint: {
+    label: 'Sprint',
+    kpis: ['sprint_velocity', 'sprint_predictability', 'spillover_rate'],
+    labels: { sprint_velocity:'Velocity (pts)', sprint_predictability:'Predictability', spillover_rate:'Spillover Rate' },
+    units: { sprint_predictability:'%', spillover_rate:'%' },
+    colors: ['#8b5cf6', '#22c55e', '#f59e0b'],
+  },
+  quality: {
+    label: 'Quality',
+    kpis: ['bugs_created', 'bug_resolution_rate', 'reopen_rate', 'critical_bugs_open'],
+    labels: { bugs_created:'Bugs Created', bug_resolution_rate:'Bug Resolution Rate %', reopen_rate:'Reopen Rate %', critical_bugs_open:'Critical Bugs Open' },
+    units: { bug_resolution_rate:'%', reopen_rate:'%' },
+    colors: ['#ef4444', '#22c55e', '#f59e0b', '#dc2626'],
+  },
+  risk: {
+    label: 'Risk',
+    kpis: ['unassigned_open', 'stuck_issues_14d', 'stale_issues_7d', 'critical_open'],
+    labels: { unassigned_open:'Unassigned', stuck_issues_14d:'Stuck >14d', stale_issues_7d:'Stale >7d', critical_open:'Critical Open' },
+    colors: ['#ef4444', '#f59e0b', '#3b82f6', '#dc2626'],
+  },
+  productivity: {
+    label: 'Productivity',
+    kpis: ['throughput', 'active_contributors', 'avg_resolution_days'],
+    labels: { throughput:'Throughput', active_contributors:'Active Contributors', avg_resolution_days:'Avg Resolution Days' },
+    colors: ['#22c55e', '#3b82f6', '#8b5cf6'],
+  },
+  release: {
+    label: 'Release',
+    kpis: ['no_fix_version_open', 'stuck_issues_14d', 'overdue_count'],
+    labels: { no_fix_version_open:'No Fix Version', stuck_issues_14d:'Stuck', overdue_count:'Overdue' },
+    colors: ['#f59e0b', '#ef4444', '#dc2626'],
+  },
+};
+let currentTrendFamily = 'delivery';
+
+function buildTrendFamilyTabs(onSelect) {
+  const c = document.getElementById('trend-family-tabs');
+  c.innerHTML = Object.entries(TREND_FAMILIES).map(([k, v]) =>
+    `<button class="period-tab ${k===currentTrendFamily?'active':''}" onclick="selectTrendFamily('${k}')">${v.label}</button>`
+  ).join('');
+}
+
+function selectTrendFamily(family) {
+  currentTrendFamily = family;
+  document.querySelectorAll('#trend-family-tabs .period-tab').forEach(t => {
+    t.classList.toggle('active', t.textContent === TREND_FAMILIES[family].label);
+  });
+  loadTrends();
+}
+
+async function loadTrends() {
+  buildTrendFamilyTabs();
+  const proj = currentProject || 'CORE';
+  const family = TREND_FAMILIES[currentTrendFamily];
+  if (!family) return;
+
+  const chartsContainer = document.getElementById('trend-charts');
+  chartsContainer.innerHTML = family.kpis.map(kpiName => `
+    <div class="chart-card">
+      <div class="chart-title">${family.labels[kpiName] || kpiName}</div>
+      <div class="chart-sub">90-day trend</div>
+      <div id="chart-trend-${kpiName}" class="chart-body"></div>
+    </div>
+  `).join('');
+
+  // Fetch and render each KPI chart
+  for (const kpiName of family.kpis) {
+    (async () => {
+      try {
+        const resp = await api(`/api/kpis/history?project_key=${proj}&kpi_name=${kpiName}&period=1m&days=90`);
+        const history = resp.history || [];
+        const labels = history.map(h => h.date.slice(5));
+        const values = history.map(h => h.value);
+        const color = family.colors[family.kpis.indexOf(kpiName)] || '#3b82f6';
+
+        const el = document.getElementById(`chart-trend-${kpiName}`);
+        if (!el) return;
+        const chart = echarts.init(el);
+        chart.setOption({
+          backgroundColor:'transparent',
+          tooltip:{trigger:'axis'},
+          grid:{left:'45px',right:'15px',bottom:'30px',top:'10px'},
+          xAxis:{type:'category',data:labels.length ? labels : ['No data'],axisLabel:{color:'#8892a4',fontSize:10,rotate:45},axisLine:{lineStyle:{color:'#2e3248'}}},
+          yAxis:{type:'value',axisLabel:{color:'#8892a4',fontSize:10},splitLine:{lineStyle:{color:'#1e2235'}}},
+          dataZoom:[{type:'inside',start:0,end:100},{type:'slider',start:0,end:100,bottom:0,height:20,borderColor:'#2e3248',backgroundColor:'#1a1d27',dataBackground:{lineStyle:{color:'#2e3248'},areaStyle:{color:'#2e3248'}},selectedDataBackground:{lineStyle:{color:'#3b82f6'},areaStyle:{color:'#3b82f6'}},labelStyle:{color:'#8892a4'}}],
+          series:[{type:'line',data:values.length ? values : [0],smooth:true,lineStyle:{color,width:2},itemStyle:{color},areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:color+'33'},{offset:1,color:color+'00'}]}},markLine:{data:values.length?[]:[{yAxis:0,label:{show:false}}]}}],
+        });
+      } catch(e) { /* silent */ }
+    })();
+  }
 }
 
 // ─── Export ───────────────────────────────────────────────────────────────────

@@ -184,6 +184,7 @@ class IssueRecord:
     dq_missing_due_date: bool
     dq_closed_without_resolution: bool
     story_points: float | None
+    sprint_ids: list[int] | None = None
 
 
 # ---------------------------------------------------------------------------

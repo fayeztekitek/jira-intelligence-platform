@@ -95,13 +95,39 @@ async def job_calculate_kpis() -> None:
             scorer = RiskScorer(kpis)
             risk = scorer.score()
 
+            # Compute sprint KPIs
+            sprint_velocity = None
+            sprint_predictability = None
+            spillover_rate = None
+            try:
+                from kpi_engine.sprint import SprintAnalyzer
+                sprint_analyzer = SprintAnalyzer(project.id, as_of=today)
+                async with get_db() as sprint_db:
+                    sprint_results = await sprint_analyzer.analyze(sprint_db)
+                if sprint_results:
+                    completed = sum(s.total_completed for s in sprint_results)
+                    committed = sum(s.total_committed for s in sprint_results)
+                    carry = sum(s.carry_over for s in sprint_results)
+                    sprint_velocity = round(completed, 1)
+                    spillover_rate = round(carry / committed, 4) if committed > 0 else 0.0
+                    # Use weighted average predictability
+                    weighted_pct = sum(s.predictability * s.total_committed
+                                       for s in sprint_results if s.predictability and s.total_committed)
+                    total_p = sum(s.total_committed for s in sprint_results if s.predictability)
+                    sprint_predictability = round(weighted_pct / total_p, 4) if total_p > 0 else None
+            except Exception as e:
+                logger.warning("sprint_kpis_failed", project=project.id, error=str(e))
+
             # Persist
             await writer.write_kpis(kpis)
             await writer.write_risk_score(risk)
 
             for period_type in ["daily", "weekly", "monthly"]:
                 await writer.write_snapshot(
-                    project.id, today, period_type, kpis, risk
+                    project.id, today, period_type, kpis, risk,
+                    sprint_velocity=sprint_velocity,
+                    sprint_predictability=sprint_predictability,
+                    spillover_rate=spillover_rate,
                 )
 
             logger.info("project_kpis_done", project=project.id,
@@ -111,6 +137,62 @@ async def job_calculate_kpis() -> None:
             logger.error("kpi_job_failed", project=project.id, error=str(e))
 
     logger.info("job_done", job="kpi_calculation")
+
+
+async def job_backfill_snapshots(days: int = 90) -> int:
+    """
+    Backfill historical snapshots for all projects, day by day.
+
+    Runs KPI calculation with as_of = each past day and writes snapshots.
+    Returns the number of snapshot rows written.
+    """
+    from sqlalchemy import select
+    from storage.database import get_db
+    from storage.models import DimProject, FactIssue
+    from kpi_engine.calculator import KPICalculator
+    from kpi_engine.calculator import IssueRecord
+    from risk_engine.scorer import RiskScorer
+    from ingestion.snapshot_writer import SnapshotWriter
+
+    logger.info("job_start", job="backfill_snapshots", days=days)
+    writer = SnapshotWriter()
+    today = date.today()
+    total_written = 0
+
+    async with get_db() as db:
+        projects = (await db.execute(
+            select(DimProject)
+        )).scalars().all()
+
+    all_issues: dict[str, list] = {}
+    for project in projects:
+        async with get_db() as db:
+            rows = (await db.execute(
+                select(FactIssue).where(FactIssue.project_key == project.id)
+            )).scalars().all()
+        all_issues[project.id] = [_row_to_record(r) for r in rows]
+
+    for day_offset in range(days):
+        as_of = today - timedelta(days=day_offset)
+        for project in projects:
+            issues = all_issues.get(project.id, [])
+            if not issues:
+                continue
+            try:
+                calc = KPICalculator(project.id, issues, as_of=as_of)
+                kpis = calc.calculate_all()
+                scorer = RiskScorer(kpis)
+                risk = scorer.score()
+                await writer.write_kpis(kpis)
+                await writer.write_risk_score(risk)
+                for pt in ["daily", "weekly", "monthly"]:
+                    await writer.write_snapshot(project.id, as_of, pt, kpis, risk)
+                    total_written += 1
+            except Exception as e:
+                logger.error("backfill_failed", project=project.id, date=as_of, error=str(e))
+
+    logger.info("job_done", job="backfill_snapshots", days=days, written=total_written)
+    return total_written
 
 
 async def job_snapshot_maintenance() -> None:
@@ -166,6 +248,7 @@ def _row_to_record(row) -> "IssueRecord":
         dq_missing_due_date=row.dq_missing_due_date or False,
         dq_closed_without_resolution=row.dq_closed_without_resolution or False,
         story_points=row.story_points,
+        sprint_ids=_parse_list(row.sprint_ids),
     )
 
 

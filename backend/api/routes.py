@@ -207,6 +207,196 @@ async def get_kpi_history(
 
 
 # ---------------------------------------------------------------------------
+# Sprint analytics
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_key}/sprints")
+async def get_project_sprints(
+    user: AuthDep,
+    project_key: str,
+    sprint_id: int | None = Query(None),
+):
+    from kpi_engine.sprint import SprintAnalyzer
+
+    analyzer = SprintAnalyzer(project_key)
+    async with get_db() as db:
+        if sprint_id:
+            result = await analyzer.analyze_sprint(db, sprint_id)
+            if result is None:
+                raise HTTPException(status_code=404, detail="Sprint not found")
+            return result.to_dict()
+        results = await analyzer.analyze(db)
+        return [r.to_dict() for r in results]
+
+
+@router.get("/sprints/{sprint_id}/burndown")
+async def get_sprint_burndown(
+    user: AuthDep,
+    sprint_id: int,
+):
+    from storage.repositories import SprintBurndownRepository
+
+    async with get_db() as db:
+        repo = SprintBurndownRepository(db)
+        data = await repo.get_burndown(sprint_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Sprint not found")
+    return {"sprint_id": sprint_id, "burndown": data}
+
+
+# ---------------------------------------------------------------------------
+# Release analytics
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_key}/releases")
+async def get_project_releases(
+    user: AuthDep,
+    project_key: str,
+    version_id: str | None = Query(None),
+):
+    from kpi_engine.release import ReleaseAnalyzer
+
+    analyzer = ReleaseAnalyzer(project_key)
+    async with get_db() as db:
+        if version_id:
+            result = await analyzer.analyze_version(db, version_id)
+            if result is None:
+                raise HTTPException(status_code=404, detail="Version not found")
+            return result.to_dict()
+        results = await analyzer.analyze(db)
+        return [r.to_dict() for r in results]
+
+
+@router.get("/versions/{version_id}/burndown")
+async def get_version_burndown(
+    user: AuthDep,
+    version_id: str,
+):
+    """Daily open vs resolved issue count for a fix version."""
+    async with get_db() as db:
+        version = await db.get(DimVersion, version_id)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+
+        all_issues = (await db.execute(
+            select(FactIssue).where(
+                FactIssue.fix_version_ids.isnot(None),
+                FactIssue.fix_version_ids != "[]",
+            )
+        )).scalars().all()
+
+        version_issues = [
+            i for i in all_issues
+            if version_id in json.loads(i.fix_version_ids or "[]")
+        ]
+
+        if not version_issues:
+            return {"version_id": version_id, "burndown": []}
+
+        # Earliest created date as chart start
+        created_dates = [i.created_date for i in version_issues if i.created_date]
+        if not created_dates:
+            return {"version_id": version_id, "burndown": []}
+
+        start = min(d.date() if hasattr(d, "date") else d for d in created_dates)
+        end = date.today()
+
+        # Collect resolution events for version issues
+        jira_keys = [i.jira_key for i in version_issues]
+        transitions_result = await db.execute(
+            select(FactTransition).where(
+                FactTransition.jira_key.in_(jira_keys),
+                FactTransition.field == "status",
+                FactTransition.to_string.in_(["Done", "Closed"]),
+            ).order_by(FactTransition.changed_at.asc())
+        )
+        resolve_events = transitions_result.scalars().all()
+
+        resolved_by_day: dict[date, int] = {}
+        issue_resolved: set[str] = set()
+        for t in resolve_events:
+            if t.changed_at is None:
+                continue
+            d = t.changed_at.date() if hasattr(t.changed_at, "date") else t.changed_at
+            if t.jira_key in issue_resolved:
+                continue
+            issue_resolved.add(t.jira_key)
+            resolved_by_day[d] = resolved_by_day.get(d, 0) + 1
+
+        total = len(version_issues)
+        burndown: list[dict] = []
+        cumulative_resolved = 0
+        current = start
+        while current <= end:
+            cumulative_resolved += resolved_by_day.get(current, 0)
+            open_count = total - cumulative_resolved
+            burndown.append({
+                "date": current.isoformat(),
+                "open": open_count,
+                "resolved": cumulative_resolved,
+            })
+            current += timedelta(days=1)
+
+    return {"version_id": version_id, "burndown": burndown}
+
+
+# ---------------------------------------------------------------------------
+# Snapshots
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_key}/snapshots")
+async def get_project_snapshots(
+    user: AuthDep,
+    project_key: str,
+    days: int = Query(90, description="Days of history to return"),
+    period_type: str = Query("daily", description="daily|weekly|monthly"),
+):
+    from storage.models import FactSnapshot
+
+    since = date.today() - timedelta(days=days)
+    async with get_db() as db:
+        rows = (await db.execute(
+            select(FactSnapshot).where(
+                FactSnapshot.project_key == project_key,
+                FactSnapshot.snapshot_date >= since,
+                FactSnapshot.period_type == period_type,
+            ).order_by(FactSnapshot.snapshot_date.asc())
+        )).scalars().all()
+
+    return {
+        "project_key": project_key,
+        "period_type": period_type,
+        "snapshots": [
+            {
+                "date": r.snapshot_date.isoformat(),
+                "total_open": r.total_open,
+                "total_created": r.total_created,
+                "total_resolved": r.total_resolved,
+                "resolution_rate": r.resolution_rate,
+                "avg_resolution_days": r.avg_resolution_days,
+                "avg_cycle_time_days": r.avg_cycle_time_days,
+                "throughput": r.throughput,
+                "backlog_size": r.backlog_size,
+                "wip": r.wip,
+                "overdue_count": r.overdue_count,
+                "bugs_created": r.bugs_created,
+                "bugs_resolved": r.bugs_resolved,
+                "bug_resolution_rate": r.bug_resolution_rate,
+                "critical_bugs_open": r.critical_bugs_open,
+                "dq_score": r.dq_score,
+                "risk_score": r.risk_score,
+                "risk_level": r.risk_level.value if r.risk_level else "low",
+                "sprint_velocity": r.sprint_velocity,
+                "sprint_predictability": r.sprint_predictability,
+            }
+            for r in rows
+        ],
+    }
+
+
 # Risk
 # ---------------------------------------------------------------------------
 
